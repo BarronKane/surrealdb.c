@@ -206,7 +206,6 @@ impl From<Geometry> for sr_geometry {
             Geometry::Collection(c) => sr_geometry::sr_g_collection(
                 c.into_iter().map(|g| g.into()).collect::<Vec<sr_geometry>>().make_array()
             ),
-            _ => sr_geometry::sr_g_unimplemented,
         }
     }
 }

@@ -2,10 +2,13 @@ use std::ffi::CStr;
 
 use chrono::DateTime;
 use surrealdb::types::{
-    Value as sdbValue, Number as sdbNumber,
+    Value as sdbValue, Number as sdbNumber, Set as sdbSet, Table as sdbTable,
 };
 
 pub use crate::{array::Array, number::Number, object::Object, geometry::sr_geometry};
+pub use crate::{file::File, range::Range};
+pub use crate::range::Bound;
+use crate::array::ArrayGen;
 use crate::{bytes::Bytes, string::string_t, thing::Thing, utils::CStringExt2, uuid::Uuid};
 
 use super::duration::Duration;
@@ -45,6 +48,16 @@ pub enum Value {
     SR_VALUE_BYTES(Bytes),
     /// Record ID (thing)
     SR_VALUE_THING(Thing),
+    /// Table name
+    SR_VALUE_TABLE(string_t),
+    /// Reference to a file in a bucket
+    SR_VALUE_FILE(File),
+    /// Range between two bounds
+    SR_VALUE_RANGE(Box<Range>),
+    /// Regular expression, as its source pattern
+    SR_VALUE_REGEX(string_t),
+    /// Set of values. Distinct from SR_VALUE_ARRAY: elements are unique.
+    SR_VALUE_SET(Box<Array>),
 }
 
 impl From<sdbValue> for Value {
@@ -57,9 +70,6 @@ impl From<sdbValue> for Value {
                 sdbNumber::Int(i) => Value::SR_VALUE_NUMBER(Number::SR_NUMBER_INT(i)),
                 sdbNumber::Float(f) => Value::SR_VALUE_NUMBER(Number::SR_NUMBER_FLOAT(f)),
                 sdbNumber::Decimal(d) => Value::SR_VALUE_NUMBER(Number::from(d)),
-                _ => {
-                    Value::SR_VALUE_NUMBER(Number::SR_NUMBER_FLOAT(0.0))
-                }
             },
             sdbValue::String(s) => Value::SR_VALUE_STRAND(s.to_string_t()),
             sdbValue::Duration(d) => Value::SR_VALUE_DURATION(Duration::from(std::time::Duration::from(d))),
@@ -70,7 +80,16 @@ impl From<sdbValue> for Value {
             sdbValue::Geometry(g) => Value::SR_GEOMETRY_OBJECT(sr_geometry::from(g)),
             sdbValue::Bytes(b) => Value::SR_VALUE_BYTES(Bytes::from(b)),
             sdbValue::RecordId(r) => Value::SR_VALUE_THING(Thing::from(r)),
-            _ => Value::SR_VALUE_NONE,
+            sdbValue::Table(t) => Value::SR_VALUE_TABLE(t.into_string().to_string_t()),
+            sdbValue::File(f) => Value::SR_VALUE_FILE(File::from(f)),
+            sdbValue::Range(r) => Value::SR_VALUE_RANGE(Box::new(Range::from(*r))),
+            sdbValue::Regex(r) => Value::SR_VALUE_REGEX(r.to_string().to_string_t()),
+            sdbValue::Set(s) => Value::SR_VALUE_SET(Box::new(Array::from(
+                Vec::<sdbValue>::from(s)
+                    .into_iter()
+                    .map(Value::from)
+                    .collect::<Vec<Value>>(),
+            ))),
         }
     }
 }
@@ -109,6 +128,20 @@ impl From<Value> for sdbValue {
             Value::SR_GEOMETRY_OBJECT(g) => sdbValue::Geometry(g.into()),
             Value::SR_VALUE_BYTES(b) => sdbValue::Bytes(b.into()),
             Value::SR_VALUE_THING(t) => sdbValue::RecordId(t.into()),
+            Value::SR_VALUE_TABLE(t) => sdbValue::Table(sdbTable::new(String::from(t))),
+            Value::SR_VALUE_FILE(f) => sdbValue::File(f.into()),
+            Value::SR_VALUE_RANGE(r) => sdbValue::Range(Box::new((*r).into())),
+            Value::SR_VALUE_REGEX(r) => match String::from(r).parse() {
+                Ok(regex) => sdbValue::Regex(regex),
+                Err(_) => sdbValue::None,
+            },
+            Value::SR_VALUE_SET(a) => sdbValue::Set(sdbSet::from(
+                ArrayGen::<Value>::from(*a)
+                    .into_vec()
+                    .into_iter()
+                    .map(sdbValue::from)
+                    .collect::<Vec<sdbValue>>(),
+            )),
         }
     }
 }
@@ -203,6 +236,134 @@ impl Value {
     }
 
     /// Create an empty Array value
+    /// Create a table-name value
+    ///
+    /// # Safety
+    ///
+    /// - `name` must be a valid null-terminated string
+    ///
+    /// Free with sr_value_free
+    #[export_name = "sr_value_table"]
+    pub extern "C" fn value_table(name: *const std::ffi::c_char) -> *mut Value {
+        if name.is_null() {
+            return Box::into_raw(Box::new(Value::SR_VALUE_NONE));
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .to_string()
+            .to_string_t();
+        Box::into_raw(Box::new(Value::SR_VALUE_TABLE(s)))
+    }
+
+    /// Create a file reference value
+    ///
+    /// # Safety
+    ///
+    /// - `bucket` and `key` must be valid null-terminated strings
+    ///
+    /// Free with sr_value_free
+    #[export_name = "sr_value_file"]
+    pub extern "C" fn value_file(
+        bucket: *const std::ffi::c_char,
+        key: *const std::ffi::c_char,
+    ) -> *mut Value {
+        if bucket.is_null() || key.is_null() {
+            return Box::into_raw(Box::new(Value::SR_VALUE_NONE));
+        }
+        let bucket = unsafe { std::ffi::CStr::from_ptr(bucket) }
+            .to_string_lossy()
+            .to_string()
+            .to_string_t();
+        let key = unsafe { std::ffi::CStr::from_ptr(key) }
+            .to_string_lossy()
+            .to_string()
+            .to_string_t();
+        Box::into_raw(Box::new(Value::SR_VALUE_FILE(File { bucket, key })))
+    }
+
+    /// Create a regular-expression value from its source pattern
+    ///
+    /// The pattern is not validated here; an invalid pattern becomes SR_VALUE_NONE
+    /// when the value is sent to the database.
+    ///
+    /// # Safety
+    ///
+    /// - `pattern` must be a valid null-terminated string
+    ///
+    /// Free with sr_value_free
+    #[export_name = "sr_value_regex"]
+    pub extern "C" fn value_regex(pattern: *const std::ffi::c_char) -> *mut Value {
+        if pattern.is_null() {
+            return Box::into_raw(Box::new(Value::SR_VALUE_NONE));
+        }
+        let s = unsafe { std::ffi::CStr::from_ptr(pattern) }
+            .to_string_lossy()
+            .to_string()
+            .to_string_t();
+        Box::into_raw(Box::new(Value::SR_VALUE_REGEX(s)))
+    }
+
+    /// Create an empty set value
+    ///
+    /// A set holds unique values; duplicates are discarded when it reaches the
+    /// database. Populate it with sr_array_push via sr_value_set_array.
+    ///
+    /// Free with sr_value_free
+    #[export_name = "sr_value_set"]
+    pub extern "C" fn value_set() -> *mut Value {
+        Box::into_raw(Box::new(Value::SR_VALUE_SET(Box::new(Array {
+            arr: std::ptr::null_mut(),
+            len: 0,
+        }))))
+    }
+
+    /// An open bound, for a range that is unbounded at one end
+    #[export_name = "sr_bound_unbounded"]
+    pub extern "C" fn bound_unbounded() -> Bound {
+        Bound::SR_BOUND_UNBOUNDED
+    }
+
+    /// A bound that includes `val`
+    ///
+    /// # Safety
+    ///
+    /// - `val` must be a valid pointer from a sr_value_* constructor. Ownership
+    ///   transfers to the bound; do not free it separately.
+    #[export_name = "sr_bound_included"]
+    pub extern "C" fn bound_included(val: *mut Value) -> Bound {
+        if val.is_null() {
+            return Bound::SR_BOUND_UNBOUNDED;
+        }
+        Bound::SR_BOUND_INCLUDED(unsafe { Box::from_raw(val) })
+    }
+
+    /// A bound that stops before `val`
+    ///
+    /// # Safety
+    ///
+    /// - `val` must be a valid pointer from a sr_value_* constructor. Ownership
+    ///   transfers to the bound; do not free it separately.
+    #[export_name = "sr_bound_excluded"]
+    pub extern "C" fn bound_excluded(val: *mut Value) -> Bound {
+        if val.is_null() {
+            return Bound::SR_BOUND_UNBOUNDED;
+        }
+        Bound::SR_BOUND_EXCLUDED(unsafe { Box::from_raw(val) })
+    }
+
+    /// Create a range value between two bounds
+    ///
+    /// Both bounds are consumed.
+    ///
+    /// Free with sr_value_free
+    #[export_name = "sr_value_range"]
+    pub extern "C" fn value_range(start: Bound, end: Bound) -> *mut Value {
+        Box::into_raw(Box::new(Value::SR_VALUE_RANGE(Box::new(Range {
+            start,
+            end,
+        }))))
+    }
+
     #[export_name = "sr_value_array"]
     pub extern "C" fn value_array() -> *mut Value {
         Box::into_raw(Box::new(Value::SR_VALUE_ARRAY(Box::new(Array {

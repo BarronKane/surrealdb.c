@@ -20,8 +20,8 @@ impl Bytes {
         unsafe { &*slice }
     }
 
-    #[export_name = "sr_free_bytes"]
-    pub extern "C" fn free_bytes(bytes: Bytes) {
+    #[export_name = "sr_bytes_free"]
+    pub extern "C" fn bytes_free(bytes: Bytes) {
         ArrayGen {
             ptr: bytes.arr,
             len: bytes.len,
@@ -29,8 +29,8 @@ impl Bytes {
         .free()
     }
 
-    #[export_name = "sr_free_byte_arr"]
-    pub extern "C" fn free_byte_arr(ptr: *mut u8, len: c_int) {
+    #[export_name = "sr_byte_arr_free"]
+    pub extern "C" fn byte_arr_free(ptr: *mut u8, len: c_int) {
         ArrayGen { ptr, len }.free()
     }
 }

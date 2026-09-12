@@ -36,6 +36,9 @@ pub enum Action {
     SR_ACTION_UPDATE,
     SR_ACTION_DELETE,
     SR_ACTION_KILLED,
+    /// The live query failed. Distinct from SR_ACTION_KILLED, which reports an
+    /// ordinary termination.
+    SR_ACTION_ERROR,
 }
 
 impl From<sdbAction> for Action {
@@ -45,7 +48,7 @@ impl From<sdbAction> for Action {
             sdbAction::Update => Action::SR_ACTION_UPDATE,
             sdbAction::Delete => Action::SR_ACTION_DELETE,
             sdbAction::Killed => Action::SR_ACTION_KILLED,
-            _ => Action::SR_ACTION_KILLED,
+            sdbAction::Error => Action::SR_ACTION_ERROR,
         }
     }
 }

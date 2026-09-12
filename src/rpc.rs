@@ -21,7 +21,7 @@ use crate::{array::MakeArray, opts::Options, stream::RpcStream, string::string_t
 /// If any operation, on any thread returns SR_FATAL then the connection is poisoned and must not be used again.
 /// (use will cause the program to abort)
 ///
-/// should be freed with sr_surreal_rpc_free
+/// should be freed with sr_surreal_rpc_disconnect
 pub struct SurrealRpc {
     inner: RwLock<SurrealRpcInner>,
     rt: Runtime,
@@ -135,7 +135,7 @@ impl SurrealRpc {
     /// - `ptr` must be a valid pointer to CBOR-encoded request data
     /// - `len` must be the length of the data at ptr
     ///
-    /// Free result with sr_free_byte_arr
+    /// Free result with sr_byte_arr_free
     #[export_name = "sr_surreal_rpc_execute"]
     pub extern "C" fn execute(
         &self,
@@ -227,7 +227,16 @@ impl SurrealRpc {
     }
 
     /// Free an RPC context
-    #[export_name = "sr_surreal_rpc_free"]
+    ///
+    /// Also closes the notification channel, so any thread blocked in
+    /// sr_rpc_stream_next returns SR_CLOSED. That is the supported way to shut
+    /// a notification reader down. Streams obtained from this context stay
+    /// valid afterwards and must still be freed with sr_rpc_stream_free.
+    ///
+    /// # Safety
+    ///
+    /// - `ctx` must be a valid pointer to a SurrealRpc, or null (no-op)
+    #[export_name = "sr_surreal_rpc_disconnect"]
     pub extern "C" fn rpc_free(ctx: *mut SurrealRpc) {
         if ctx.is_null() {
             return;

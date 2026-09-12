@@ -28,6 +28,7 @@ extern void RunTestGroup_RPC(void);
 extern void RunTestGroup_Stream(void);
 extern void RunTestGroup_Transaction(void);
 extern void RunTestGroup_Utility(void);
+extern void RunTestGroup_ValueTypes(void);
 extern void RunTestGroup_Variable(void);
 
 void sr_run_all_test_groups(void)
@@ -44,6 +45,7 @@ void sr_run_all_test_groups(void)
     RUN_TEST_GROUP(Stream);
     RUN_TEST_GROUP(Transaction);
     RUN_TEST_GROUP(Utility);
+    RUN_TEST_GROUP(ValueTypes);
     RUN_TEST_GROUP(Variable);
 }
 

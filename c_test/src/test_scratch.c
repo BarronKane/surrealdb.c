@@ -48,13 +48,13 @@ int main() {
             // Print the object somehow - need to convert to value
         }
     }
-    if (plan_result) sr_free_object(*plan_result);
-    sr_free_object(plan);
+    if (plan_result) sr_object_free(*plan_result);
+    sr_object_free(plan);
     
     // Verify plan exists
     printf("\n2. Verify plan exists:\n");
     n = sr_query(db, &err, &r, "SELECT * FROM plan;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
     
     // Create organization like saas_example does
     printf("\n3. Creating organization with sr_create:\n");
@@ -70,13 +70,13 @@ int main() {
     } else {
         printf("  sr_create returned %d\n", res);
     }
-    if (org_result) sr_free_object(*org_result);
-    sr_free_object(org);
+    if (org_result) sr_object_free(*org_result);
+    sr_object_free(org);
     
     // Verify organization exists
     printf("\n4. Verify organization exists:\n");
     n = sr_query(db, &err, &r, "SELECT * FROM organization;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
     
     // Create subscription relation
     printf("\n5. Creating subscription with sr_relate:\n");
@@ -95,13 +95,13 @@ int main() {
             printf("  Relation: "); sr_value_print(&rel_result[0]);
         }
     }
-    if (rel_result) sr_free_arr(rel_result, res);
-    sr_free_object(sub);
+    if (rel_result) sr_values_free(rel_result, res);
+    sr_object_free(sub);
     
     // Verify relation exists
     printf("\n6. Verify relation exists:\n");
     n = sr_query(db, &err, &r, "SELECT * FROM subscribes_to;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
     
     // NOW test the exact saas_example step 9 query
     printf("\n7. Step 9 query - SELECT with graph traversal:\n");
@@ -110,17 +110,17 @@ int main() {
         "->subscribes_to->plan.name AS plan_name, "
         "->subscribes_to->plan.price_monthly AS monthly_cost "
         "FROM organization;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
     
     // Simpler graph query
     printf("\n8. Simpler: SELECT name, ->subscribes_to->plan AS plans FROM organization:\n");
     n = sr_query(db, &err, &r, "SELECT name, ->subscribes_to->plan AS plans FROM organization;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
     
     // Even simpler
     printf("\n9. Just traversal: SELECT ->subscribes_to FROM organization:\n");
     n = sr_query(db, &err, &r, "SELECT ->subscribes_to FROM organization;", NULL);
-    print_results(r, n); sr_free_arr_res_arr(r, n);
+    print_results(r, n); sr_arr_res_arr_free(r, n);
 
     sr_surreal_disconnect(db);
     printf("\n=== Test Complete ===\n");

@@ -36,14 +36,14 @@ TEST(Auth, Signin) {
     int result = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
     if (result < 0) {
         // In-memory DB may not require/support root auth - this is expected
-        if (err) sr_free_string(err);
+        if (err) sr_string_free(err);
         // Test passes - we verified the function doesn't crash
         return;
     }
     
     // If signin succeeded, token should be returned
     TEST_ASSERT_NOT_NULL_MESSAGE(token, "Token should be returned on successful signin");
-    sr_free_string(token);
+    sr_string_free(token);
 }
 
 TEST(Auth, Signup) {
@@ -60,11 +60,11 @@ TEST(Auth, Signup) {
     
     if (result < 0) {
         // If we can't create access method, skip gracefully
-        if (err) sr_free_string(err);
+        if (err) sr_string_free(err);
         return;
     }
     if (result > 0) {
-        sr_free_arr_res_arr(query_res, result);
+        sr_arr_res_arr_free(query_res, result);
     }
     
     // Test RECORD signup
@@ -76,13 +76,13 @@ TEST(Auth, Signup) {
     result = sr_signup(db, &err, &token, &scope, &creds, &details, NULL);
     if (result < 0) {
         // Signup may fail in embedded mode - this is acceptable
-        if (err) sr_free_string(err);
+        if (err) sr_string_free(err);
         return;
     }
     
     // If signup succeeded, token should be returned
     TEST_ASSERT_NOT_NULL_MESSAGE(token, "Token should be returned on successful signup");
-    sr_free_string(token);
+    sr_string_free(token);
 }
 
 TEST_GROUP_RUNNER(Auth) {

@@ -1,8 +1,21 @@
 language = "C"
 pragma_once = true
 
+# The status codes are written out here rather than exported from Rust.
+# export.prefix would otherwise stack "sr_" onto names that already begin with
+# SR_, giving sr_SR_ERROR, while every doc comment in this header refers to
+# SR_ERROR. export.rename does not apply to constants, so exclusion plus an
+# explicit definition is the way to keep the two in agreement.
+after_includes = """
+#define SR_NONE 0
+#define SR_CLOSED -1
+#define SR_ERROR -2
+#define SR_FATAL -3
+"""
+
 [export]
 prefix = "sr_"
+exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
 
 
 [export.rename]
@@ -12,6 +25,9 @@ prefix = "sr_"
 "Object" = "object_t"
 "Value" = "value_t"
 "Thing" = "thing_t"
+"File" = "file_t"
+"Range" = "range_t"
+"Bound" = "bound_t"
 "Uuid" = "uuid_t"
 "Bytes" = "bytes_t"
 "string_t" = "string_t"
@@ -27,6 +43,4 @@ prefix = "sr_"
 "ArrayResultArrayResult" = "arr_res_arr_res_t"
 "StringResult" = "string_res_t"
 "SurrealResult" = "surreal_res_t"
-"SR_FATAL" = "SR_FATAL"
-"SR_ERROR" = "SR_ERROR"
 "Options" = "option_t"

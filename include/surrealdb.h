@@ -4,14 +4,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#define SR_NONE 0
+#define SR_CLOSED -1
+#define SR_ERROR -2
+#define SR_FATAL -3
 
-#define sr_SR_NONE 0
+#define SR_VERSION_MAJOR 0
+#define SR_VERSION_MINOR 1
+#define SR_VERSION_PATCH 0
+#define SR_VERSION_STRING "0.1.0"
 
-#define sr_SR_CLOSED -1
+/* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
+#define SR_VERSION_ENCODE(major, minor, patch) \
+(((major) * 10000) + ((minor) * 100) + (patch))
+#define SR_VERSION \
+SR_VERSION_ENCODE(SR_VERSION_MAJOR, SR_VERSION_MINOR, SR_VERSION_PATCH)
 
-#define sr_SR_ERROR -2
-
-#define sr_SR_FATAL -3
 
 typedef enum sr_credentials_scope {
   ROOT,
@@ -25,6 +33,11 @@ typedef enum sr_action {
   SR_ACTION_UPDATE,
   SR_ACTION_DELETE,
   SR_ACTION_KILLED,
+  /**
+   * The live query failed. Distinct from SR_ACTION_KILLED, which reports an
+   * ordinary termination.
+   */
+  SR_ACTION_ERROR,
 } sr_action;
 
 typedef struct sr_opaque_object_internal_t sr_opaque_object_internal_t;
@@ -63,7 +76,7 @@ typedef struct sr_surreal_t sr_surreal_t;
  * If any operation, on any thread returns SR_FATAL then the connection is poisoned and must not be used again.
  * (use will cause the program to abort)
  *
- * should be freed with sr_surreal_rpc_free
+ * should be freed with sr_surreal_rpc_disconnect
  */
 typedef struct sr_surreal_rpc_t sr_surreal_rpc_t;
 
@@ -71,7 +84,7 @@ typedef struct sr_surreal_rpc_t sr_surreal_rpc_t;
  * A null-terminated C string type
  *
  * This is a wrapper around a raw C string pointer that handles memory management.
- * Strings returned by SurrealDB functions must be freed with `sr_free_string`.
+ * Strings returned by SurrealDB functions must be freed with `sr_string_free`.
  */
 typedef char *sr_string_t;
 
@@ -255,6 +268,70 @@ typedef struct sr_thing_t {
 } sr_thing_t;
 
 /**
+ * A reference to a file held in a bucket
+ *
+ * Both fields are owned by this struct and are released by `sr_value_free`
+ * when the file is reached through a `sr_value_t`.
+ */
+typedef struct sr_file_t {
+  /**
+   * The bucket the file lives in
+   */
+  sr_string_t bucket;
+  /**
+   * The key identifying the file within the bucket
+   */
+  sr_string_t key;
+} sr_file_t;
+
+/**
+ * One end of a range
+ *
+ * Mirrors `std::ops::Bound`: a bound is either absent, or present and either
+ * inclusive or exclusive of its value.
+ */
+typedef enum sr_bound_t_Tag {
+  /**
+   * The range is open at this end
+   */
+  SR_BOUND_UNBOUNDED,
+  /**
+   * The range includes this value
+   */
+  SR_BOUND_INCLUDED,
+  /**
+   * The range stops before this value
+   */
+  SR_BOUND_EXCLUDED,
+} sr_bound_t_Tag;
+
+typedef struct sr_bound_t {
+  sr_bound_t_Tag tag;
+  union {
+    struct {
+      struct sr_value_t *sr_bound_included;
+    };
+    struct {
+      struct sr_value_t *sr_bound_excluded;
+    };
+  };
+} sr_bound_t;
+
+/**
+ * A range between two bounds
+ */
+typedef struct sr_range_t {
+  /**
+   * The lower bound
+   */
+  struct sr_bound_t start;
+  /**
+   * The upper bound
+   */
+  struct sr_bound_t end;
+} sr_range_t;
+
+/**
  * Represents a SurrealDB value
  *
  * This enum wraps all possible value types that can be returned from SurrealDB queries
@@ -313,6 +390,26 @@ typedef enum sr_value_t_Tag {
    * Record ID (thing)
    */
   SR_VALUE_THING,
+  /**
+   * Table name
+   */
+  SR_VALUE_TABLE,
+  /**
+   * Reference to a file in a bucket
+   */
+  SR_VALUE_FILE,
+  /**
+   * Range between two bounds
+   */
+  SR_VALUE_RANGE,
+  /**
+   * Regular expression, as its source pattern
+   */
+  SR_VALUE_REGEX,
+  /**
+   * Set of values. Distinct from SR_VALUE_ARRAY: elements are unique.
+   */
+  SR_VALUE_SET,
 } sr_value_t_Tag;
 
 typedef struct sr_value_t {
@@ -350,6 +447,21 @@ typedef struct sr_value_t {
     };
     struct {
       struct sr_thing_t sr_value_thing;
+    };
+    struct {
+      sr_string_t sr_value_table;
+    };
+    struct {
+      struct sr_file_t sr_value_file;
+    };
+    struct {
+      struct sr_range_t *sr_value_range;
+    };
+    struct {
+      sr_string_t sr_value_regex;
+    };
+    struct {
+      struct sr_array_t *sr_value_set;
     };
   };
 } sr_value_t;
@@ -586,7 +698,7 @@ int sr_create(const struct sr_surreal_t *db,
  *     printf("%s", err);
  *     return 1;
  * }
- * sr_free_arr(deleted, len);
+ * sr_values_free(deleted, len);
  * ```
  */
 int sr_delete(const struct sr_surreal_t *db,
@@ -694,7 +806,7 @@ int sr_import(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *f
  *     printf("%s", err);
  *     return 1;
  * }
- * sr_free_arr(inserted, len);
+ * sr_values_free(inserted, len);
  * ```
  */
 int sr_insert(const struct sr_surreal_t *db,
@@ -734,7 +846,7 @@ int sr_insert(const struct sr_surreal_t *db,
  *     printf("Failed to insert relation: %s", err);
  *     return 1;
  * }
- * sr_free_arr(result, len);
+ * sr_values_free(result, len);
  * ```
  */
 int sr_insert_relation(const struct sr_surreal_t *db,
@@ -767,7 +879,7 @@ int sr_insert_relation(const struct sr_surreal_t *db,
  *     printf("Failed to run function: %s", err);
  *     return 1;
  * }
- * sr_free_arr(result, 1);
+ * sr_values_free(result, 1);
  * ```
  */
 int sr_run(const struct sr_surreal_t *db,
@@ -803,7 +915,7 @@ int sr_run(const struct sr_surreal_t *db,
  *     printf("Failed to create relation: %s", err);
  *     return 1;
  * }
- * sr_free_arr(result, len);
+ * sr_values_free(result, len);
  * ```
  */
 int sr_relate(const struct sr_surreal_t *db,
@@ -917,7 +1029,7 @@ int sr_select_live(const struct sr_surreal_t *db,
  *     printf("%s", err);
  *     return 1;
  * }
- * sr_free_arr(merged, len);
+ * sr_values_free(merged, len);
  * ```
  */
 int sr_merge(const struct sr_surreal_t *db,
@@ -952,7 +1064,7 @@ int sr_merge(const struct sr_surreal_t *db,
  *     printf("Failed to patch: %s", err);
  *     return 1;
  * }
- * sr_free_arr(patched, len);
+ * sr_values_free(patched, len);
  * ```
  */
 int sr_patch_add(const struct sr_surreal_t *db,
@@ -984,7 +1096,7 @@ int sr_patch_add(const struct sr_surreal_t *db,
  *     printf("Failed to patch: %s", err);
  *     return 1;
  * }
- * sr_free_arr(patched, len);
+ * sr_values_free(patched, len);
  * ```
  */
 int sr_patch_remove(const struct sr_surreal_t *db,
@@ -1017,7 +1129,7 @@ int sr_patch_remove(const struct sr_surreal_t *db,
  *     printf("Failed to patch: %s", err);
  *     return 1;
  * }
- * sr_free_arr(patched, len);
+ * sr_values_free(patched, len);
  * ```
  */
 int sr_patch_replace(const struct sr_surreal_t *db,
@@ -1051,7 +1163,7 @@ int sr_query(const struct sr_surreal_t *db,
  *
  * can be used to select everything from a table or a single record
  * writes values to *res_ptr, and returns the number of values
- * result values are allocated by Surreal and must be freed with sr_free_arr
+ * result values are allocated by Surreal and must be freed with sr_values_free
  *
  * # Safety
  *
@@ -1076,7 +1188,7 @@ int sr_query(const struct sr_surreal_t *db,
  * {
  *     sr_value_print(&foos[i]);
  * }
- * sr_free_arr(foos, len);
+ * sr_values_free(foos, len);
  */
 int sr_select(const struct sr_surreal_t *db,
               sr_string_t *err_ptr,
@@ -1141,7 +1253,7 @@ int sr_set(const struct sr_surreal_t *db,
  *     return 1;
  * }
  * // token now contains the JWT
- * sr_free_string(token);
+ * sr_string_free(token);
  * ```
  * ```c
  * sr_surreal_t *db;
@@ -1221,7 +1333,7 @@ int sr_signin(const struct sr_surreal_t *db,
  *     return 1;
  * }
  * // token now contains the JWT
- * sr_free_string(token);
+ * sr_string_free(token);
  * ```
  * For custom params:
  * ```c
@@ -1290,7 +1402,7 @@ int sr_unset(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *ke
  *     printf("%s", err);
  *     return 1;
  * }
- * sr_free_arr(updated, len);
+ * sr_values_free(updated, len);
  * ```
  */
 int sr_update(const struct sr_surreal_t *db,
@@ -1324,7 +1436,7 @@ int sr_update(const struct sr_surreal_t *db,
  *     printf("%s", err);
  *     return 1;
  * }
- * sr_free_arr(upserted, len);
+ * sr_values_free(upserted, len);
  * ```
  */
 int sr_upsert(const struct sr_surreal_t *db,
@@ -1387,7 +1499,7 @@ int sr_use_ns(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *n
  * Returns the database version
  *
  * Retrieves the version string of the connected SurrealDB server.
- * NOTE: version is allocated in Surreal and must be freed with sr_free_string
+ * NOTE: version is allocated in Surreal and must be freed with sr_string_free
  *
  * # Safety
  *
@@ -1407,7 +1519,7 @@ int sr_use_ns(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *n
  *     return 1;
  * }
  * printf("%s", ver);
- * sr_free_string(ver);
+ * sr_string_free(ver);
  * ```
  */
 int sr_version(const struct sr_surreal_t *db, sr_string_t *err_ptr, sr_string_t *res_ptr);
@@ -1427,7 +1539,7 @@ int sr_surreal_rpc_new(sr_string_t *err_ptr,
  * - `ptr` must be a valid pointer to CBOR-encoded request data
  * - `len` must be the length of the data at ptr
  *
- * Free result with sr_free_byte_arr
+ * Free result with sr_byte_arr_free
  */
 int sr_surreal_rpc_execute(const struct sr_surreal_rpc_t *self,
                            sr_string_t *err_ptr,
@@ -1451,10 +1563,19 @@ int sr_surreal_rpc_notifications(const struct sr_surreal_rpc_t *self,
 
 /**
  * Free an RPC context
+ *
+ * Also closes the notification channel, so any thread blocked in
+ * sr_rpc_stream_next returns SR_CLOSED. That is the supported way to shut
+ * a notification reader down. Streams obtained from this context stay
+ * valid afterwards and must still be freed with sr_rpc_stream_free.
+ *
+ * # Safety
+ *
+ * - `ctx` must be a valid pointer to a SurrealRpc, or null (no-op)
  */
-void sr_surreal_rpc_free(struct sr_surreal_rpc_t *ctx);
+void sr_surreal_rpc_disconnect(struct sr_surreal_rpc_t *ctx);
 
-void sr_free_arr(struct sr_value_t *ptr, int len);
+void sr_values_free(struct sr_value_t *ptr, int len);
 
 /**
  * Get the length of an array
@@ -1479,9 +1600,9 @@ struct sr_array_t *sr_array_push(const struct sr_array_t *arr, const struct sr_v
  */
 void sr_array_free(struct sr_array_t *arr);
 
-void sr_free_bytes(struct sr_bytes_t bytes);
+void sr_bytes_free(struct sr_bytes_t bytes);
 
-void sr_free_byte_arr(uint8_t *ptr, int len);
+void sr_byte_arr_free(uint8_t *ptr, int len);
 
 void sr_print_notification(const struct sr_notification_t *notification);
 
@@ -1557,7 +1678,7 @@ void sr_object_insert_double(struct sr_object_t *obj, const char *key, double va
 /**
  * Free an object
  */
-void sr_free_object(struct sr_object_t obj);
+void sr_object_free(struct sr_object_t obj);
 
 /**
  * Get the number of key-value pairs in the object
@@ -1567,37 +1688,33 @@ int sr_object_len(const struct sr_object_t *obj);
 /**
  * Get all keys from the object as a null-terminated array of strings
  * Returns the number of keys, or -1 on error
- * The caller must free the returned array using sr_free_string_arr
+ * The caller must free the returned array using sr_string_arr_free
  */
 int sr_object_keys(const struct sr_object_t *obj, char ***keys_ptr);
 
 /**
  * Free a string array returned by sr_object_keys
  */
-void sr_free_string_arr(char **arr, int len);
+void sr_string_arr_free(char **arr, int len);
 
-void sr_free_arr_res(struct sr_arr_res_t res);
+void sr_arr_res_free(struct sr_arr_res_t res);
 
-void sr_free_arr_res_arr(struct sr_arr_res_t *ptr, int len);
+void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
 
 /**
- * Blocks until next item is received on stream
- * will return 1 and write notification to notification_ptr if received
- * will return SR_NONE if the stream is closed
+ * Get the next notification, blocking until one arrives
  *
- * sr_stream_t *stream;
- * if (sr_select_live(db, &err, &stream, "foo") < 0)
- * {
- *     printf("%s", err);
- *     return 1;
- * }
+ * # Blocking and shutdown
  *
- * sr_notification_t not ;
- * if (sr_stream_next(stream, &not ) > 0)
- * {
- *     sr_print_notification(&not );
- * }
- * sr_stream_kill(stream);
+ * This call blocks until a notification is available; there is no timeout or
+ * non-blocking variant. It is intended to be driven from a dedicated thread
+ * rather than a latency-sensitive one.
+ *
+ * To retire that thread, free the connection the stream came from. Doing so
+ * drops the sending half of the notification channel, and a reader parked
+ * inside this function returns SR_CLOSED. The stream itself stays valid and
+ * must still be freed. Freeing the connection is the only way to release a
+ * blocked reader.
  */
 int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notification_ptr);
 
@@ -1610,12 +1727,19 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
 void sr_stream_kill(struct sr_stream_t *stream);
 
 /**
- * Get the next notification from the stream
+ * Get the next notification, blocking until one arrives
  *
- * Returns the length of the CBOR-encoded notification, or SR_CLOSED if the
- * channel is closed. The CBOR-encoded bytes are written to *res_ptr.
+ * # Blocking and shutdown
  *
- * Free the result with sr_free_byte_arr.
+ * This call blocks until a notification is available; there is no timeout or
+ * non-blocking variant. It is intended to be driven from a dedicated thread
+ * rather than a latency-sensitive one.
+ *
+ * To retire that thread, free the connection the stream came from. Doing so
+ * drops the sending half of the notification channel, and a reader parked
+ * inside this function returns SR_CLOSED. The stream itself stays valid and
+ * must still be freed. Freeing the connection is the only way to release a
+ * blocked reader.
  */
 int sr_rpc_stream_next(struct sr_RpcStream *self, uint8_t **res_ptr);
 
@@ -1630,7 +1754,7 @@ void sr_rpc_stream_free(struct sr_RpcStream *stream);
  * This function must be called to free strings returned by SurrealDB functions
  * to avoid memory leaks.
  */
-void sr_free_string(sr_string_t string);
+void sr_string_free(sr_string_t string);
 
 /**
  * Print a value to stdout for debugging
@@ -1698,7 +1822,85 @@ struct sr_value_t *sr_value_uuid(const uint8_t *bytes);
 
 /**
  * Create an empty Array value
+ * Create a table-name value
+ *
+ * # Safety
+ *
+ * - `name` must be a valid null-terminated string
+ *
+ * Free with sr_value_free
  */
+struct sr_value_t *sr_value_table(const char *name);
+
+/**
+ * Create a file reference value
+ *
+ * # Safety
+ *
+ * - `bucket` and `key` must be valid null-terminated strings
+ *
+ * Free with sr_value_free
+ */
+struct sr_value_t *sr_value_file(const char *bucket, const char *key);
+
+/**
+ * Create a regular-expression value from its source pattern
+ *
+ * The pattern is not validated here; an invalid pattern becomes SR_VALUE_NONE
+ * when the value is sent to the database.
+ *
+ * # Safety
+ *
+ * - `pattern` must be a valid null-terminated string
+ *
+ * Free with sr_value_free
+ */
+struct sr_value_t *sr_value_regex(const char *pattern);
+
+/**
+ * Create an empty set value
+ *
+ * A set holds unique values; duplicates are discarded when it reaches the
+ * database. Populate it with sr_array_push via sr_value_set_array.
+ *
+ * Free with sr_value_free
+ */
+struct sr_value_t *sr_value_set(void);
+
+/**
+ * An open bound, for a range that is unbounded at one end
+ */
+struct sr_bound_t sr_bound_unbounded(void);
+
+/**
+ * A bound that includes `val`
+ *
+ * # Safety
+ *
+ * - `val` must be a valid pointer from a sr_value_* constructor. Ownership
+ *   transfers to the bound; do not free it separately.
+ */
+struct sr_bound_t sr_bound_included(struct sr_value_t *val);
+
+/**
+ * A bound that stops before `val`
+ *
+ * # Safety
+ *
+ * - `val` must be a valid pointer from a sr_value_* constructor. Ownership
+ *   transfers to the bound; do not free it separately.
+ */
+struct sr_bound_t sr_bound_excluded(struct sr_value_t *val);
+
+/**
+ * Create a range value between two bounds
+ *
+ * Both bounds are consumed.
+ *
+ * Free with sr_value_free
+ */
+struct sr_value_t *sr_value_range(struct sr_bound_t start, struct sr_bound_t end);
+
 struct sr_value_t *sr_value_array(void);
 
 /**

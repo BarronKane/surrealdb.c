@@ -116,8 +116,8 @@ impl Object {
     }
 
     /// Free an object
-    #[export_name = "sr_free_object"]
-    pub extern "C" fn free_object(obj: Object) {
+    #[export_name = "sr_object_free"]
+    pub extern "C" fn object_free(obj: Object) {
         drop(obj)
     }
 
@@ -132,7 +132,7 @@ impl Object {
 
     /// Get all keys from the object as a null-terminated array of strings
     /// Returns the number of keys, or -1 on error
-    /// The caller must free the returned array using sr_free_string_arr
+    /// The caller must free the returned array using sr_string_arr_free
     #[export_name = "sr_object_keys"]
     pub extern "C" fn object_keys(obj: *const Object, keys_ptr: *mut *mut *mut c_char) -> c_int {
         if obj.is_null() || keys_ptr.is_null() {
@@ -162,8 +162,8 @@ impl Object {
     }
 
     /// Free a string array returned by sr_object_keys
-    #[export_name = "sr_free_string_arr"]
-    pub extern "C" fn free_string_arr(arr: *mut *mut c_char, len: c_int) {
+    #[export_name = "sr_string_arr_free"]
+    pub extern "C" fn string_arr_free(arr: *mut *mut c_char, len: c_int) {
         if arr.is_null() || len <= 0 {
             return;
         }

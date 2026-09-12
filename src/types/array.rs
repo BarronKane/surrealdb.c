@@ -190,8 +190,8 @@ impl Drop for Array {
 }
 
 impl Array {
-    #[export_name = "sr_free_arr"]
-    pub extern "C" fn free_arr(ptr: *mut Value, len: c_int) {
+    #[export_name = "sr_values_free"]
+    pub extern "C" fn values_free(ptr: *mut Value, len: c_int) {
         ArrayGen { ptr, len }.free()
     }
 

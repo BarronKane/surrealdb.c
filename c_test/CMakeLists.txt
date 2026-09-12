@@ -2,10 +2,12 @@
 # SurrealDB C Library - Test Suite
 # ============================================================================
 
-# Make sure CMake can find <solution-root>/cmake/FindUnity.cmake
-list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
-
 find_package(Unity REQUIRED)
+
+# test_support.c needs threads: C11 <threads.h> where it exists, pthreads or
+# the Win32 API otherwise.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # Put test outputs in the build tree (cleaner than writing into source/)
 set(_test_bin_dir "${CMAKE_CURRENT_BINARY_DIR}/bin")
@@ -44,6 +46,7 @@ target_include_directories(test_runner PRIVATE
 target_link_libraries(test_runner PRIVATE
     Unity::unity
     surrealdb_c
+    Threads::Threads
 )
 
 set_target_properties(test_runner PROPERTIES
@@ -85,8 +88,6 @@ endif()
 # CTest Integration
 # ============================================================================
 
-enable_testing()
-
 # One test per Unity group rather than a single all-or-nothing entry, so CI
 # reports which group failed. Group names are read back out of the corpus.
 set(_sdb_test_groups "")
@@ -102,8 +103,19 @@ list(SORT _sdb_test_groups)
 
 foreach(_group IN LISTS _sdb_test_groups)
     add_test(NAME "surrealdb_c.${_group}" COMMAND test_runner -g "${_group}" -v)
+
+    # Everything runs against mem://, so the whole suite is labelled "embedded"
+    # and needs no server. LegacyApi is additionally labelled so the older
+    # corpus can be included or excluded on its own: ctest -LE legacy
+    set(_labels "embedded")
+    if(_group STREQUAL "LegacyApi")
+        list(APPEND _labels "legacy")
+    endif()
+
     set_tests_properties("surrealdb_c.${_group}" PROPERTIES
         WORKING_DIRECTORY "${_test_bin_dir}"
+        LABELS "${_labels}"
+        TIMEOUT 300
     )
 endforeach()
 

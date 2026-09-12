@@ -383,7 +383,7 @@ impl Surreal {
     ///     printf("%s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(deleted, len);
+    /// sr_values_free(deleted, len);
     /// ```
     #[export_name = "sr_delete"]
     pub extern "C" fn delete(
@@ -538,7 +538,7 @@ impl Surreal {
     ///     printf("%s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(inserted, len);
+    /// sr_values_free(inserted, len);
     /// ```
     #[export_name = "sr_insert"]
     pub extern "C" fn insert(
@@ -604,7 +604,7 @@ impl Surreal {
     ///     printf("Failed to insert relation: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(result, len);
+    /// sr_values_free(result, len);
     /// ```
     #[export_name = "sr_insert_relation"]
     pub extern "C" fn insert_relation(
@@ -663,7 +663,7 @@ impl Surreal {
     ///     printf("Failed to run function: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(result, 1);
+    /// sr_values_free(result, 1);
     /// ```
     #[export_name = "sr_run"]
     pub extern "C" fn run(
@@ -730,7 +730,7 @@ impl Surreal {
     ///     printf("Failed to create relation: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(result, len);
+    /// sr_values_free(result, len);
     /// ```
     #[export_name = "sr_relate"]
     pub extern "C" fn relate(
@@ -910,7 +910,7 @@ impl Surreal {
     ///     printf("%s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(merged, len);
+    /// sr_values_free(merged, len);
     /// ```
     #[export_name = "sr_merge"]
     pub extern "C" fn merge(
@@ -971,7 +971,7 @@ impl Surreal {
     ///     printf("Failed to patch: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(patched, len);
+    /// sr_values_free(patched, len);
     /// ```
     #[export_name = "sr_patch_add"]
     pub extern "C" fn patch_add(
@@ -1031,7 +1031,7 @@ impl Surreal {
     ///     printf("Failed to patch: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(patched, len);
+    /// sr_values_free(patched, len);
     /// ```
     #[export_name = "sr_patch_remove"]
     pub extern "C" fn patch_remove(
@@ -1090,7 +1090,7 @@ impl Surreal {
     ///     printf("Failed to patch: %s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(patched, len);
+    /// sr_values_free(patched, len);
     /// ```
     #[export_name = "sr_patch_replace"]
     pub extern "C" fn patch_replace(
@@ -1189,7 +1189,7 @@ impl Surreal {
     ///
     /// can be used to select everything from a table or a single record
     /// writes values to *res_ptr, and returns the number of values
-    /// result values are allocated by Surreal and must be freed with sr_free_arr
+    /// result values are allocated by Surreal and must be freed with sr_values_free
     ///
     /// # Safety
     ///
@@ -1214,7 +1214,7 @@ impl Surreal {
     /// {
     ///     sr_value_print(&foos[i]);
     /// }
-    /// sr_free_arr(foos, len);
+    /// sr_values_free(foos, len);
     #[export_name = "sr_select"]
     pub extern "C" fn select(
         db: &Surreal,
@@ -1313,7 +1313,7 @@ impl Surreal {
     ///     return 1;
     /// }
     /// // token now contains the JWT
-    /// sr_free_string(token);
+    /// sr_string_free(token);
     /// ```
     /// ```c
     /// sr_surreal_t *db;
@@ -1508,7 +1508,7 @@ impl Surreal {
     ///     return 1;
     /// }
     /// // token now contains the JWT
-    /// sr_free_string(token);
+    /// sr_string_free(token);
     /// ```
     /// For custom params:
     /// ```c
@@ -1671,7 +1671,7 @@ impl Surreal {
     ///     printf("%s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(updated, len);
+    /// sr_values_free(updated, len);
     /// ```
     #[export_name = "sr_update"]
     pub extern "C" fn update(
@@ -1731,7 +1731,7 @@ impl Surreal {
     ///     printf("%s", err);
     ///     return 1;
     /// }
-    /// sr_free_arr(upserted, len);
+    /// sr_values_free(upserted, len);
     /// ```
     #[export_name = "sr_upsert"]
     pub extern "C" fn upsert(
@@ -1836,7 +1836,7 @@ impl Surreal {
     /// Returns the database version
     ///
     /// Retrieves the version string of the connected SurrealDB server.
-    /// NOTE: version is allocated in Surreal and must be freed with sr_free_string
+    /// NOTE: version is allocated in Surreal and must be freed with sr_string_free
     ///
     /// # Safety
     ///
@@ -1856,7 +1856,7 @@ impl Surreal {
     ///     return 1;
     /// }
     /// printf("%s", ver);
-    /// sr_free_string(ver);
+    /// sr_string_free(ver);
     /// ```
     #[export_name = "sr_version"]
     pub extern "C" fn version(

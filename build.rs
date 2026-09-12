@@ -22,11 +22,20 @@ fn main() {
     // when the Rust API changes and the committed header silently goes stale.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=cbindgen.toml");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed={DRIVE_CMAKE}");
 
     // OUT_DIR is the canonical location for generated output.
     let generated = Path::new(&out_dir).join("surrealdb.h");
-    cbindgen::generate(&crate_dir)
+
+    // Version macros come from Cargo.toml so the manifest stays the single
+    // source of truth; a consumer can then #if against SR_VERSION_* without
+    // waiting for a runtime call.
+    let mut config = cbindgen::Config::from_root_or_default(&crate_dir);
+    let after = config.after_includes.take().unwrap_or_default();
+    config.after_includes = Some(format!("{after}{}", version_macros()));
+
+    cbindgen::generate_with_config(&crate_dir, config)
         .expect("unable to generate bindings")
         .write_to_file(&generated);
 
@@ -41,6 +50,27 @@ fn main() {
     if env::var_os(DRIVE_CMAKE).is_some() {
         drive_cmake(&crate_dir);
     }
+}
+
+/// Version macros written into the generated header.
+fn version_macros() -> String {
+    let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_default();
+    let minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_default();
+    let patch = env::var("CARGO_PKG_VERSION_PATCH").unwrap_or_default();
+
+    format!(
+        "\n\
+         #define SR_VERSION_MAJOR {major}\n\
+         #define SR_VERSION_MINOR {minor}\n\
+         #define SR_VERSION_PATCH {patch}\n\
+         #define SR_VERSION_STRING \"{major}.{minor}.{patch}\"\n\
+         \n\
+         /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */\n\
+         #define SR_VERSION_ENCODE(major, minor, patch) \\\n\
+             (((major) * 10000) + ((minor) * 100) + (patch))\n\
+         #define SR_VERSION \\\n\
+             SR_VERSION_ENCODE(SR_VERSION_MAJOR, SR_VERSION_MINOR, SR_VERSION_PATCH)\n"
+    )
 }
 
 /// Copy the generated header over the tracked one, best effort.

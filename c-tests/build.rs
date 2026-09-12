@@ -49,6 +49,41 @@ fn main() {
 
     build.warnings(false).compile("surrealdb_c_test_corpus");
 
+    // Emit one #[test] per Unity group, read out of the corpus itself. CMake
+    // derives its CTest entries the same way and runner.c is generated from it,
+    // so no group list is maintained by hand anywhere.
+    let mut groups: Vec<String> = Vec::new();
+    for source in c_sources(&tests) {
+        let text = fs::read_to_string(&source).unwrap_or_default();
+        for line in text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("TEST_GROUP_RUNNER(") {
+                if let Some(name) = rest.split(')').next() {
+                    groups.push(name.to_string());
+                }
+            }
+        }
+    }
+    groups.sort();
+    groups.dedup();
+
+    // Unity filters groups with strstr(), so one name containing another would
+    // silently run both.
+    for a in &groups {
+        for b in &groups {
+            assert!(a == b || !b.contains(a.as_str()), "group {a} is a substring of {b}");
+        }
+    }
+
+    let generated: String = groups
+        .iter()
+        .map(|g| format!("test_group!({}, \"{}\");\n", g.to_lowercase(), g))
+        .collect();
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("groups.rs"),
+        generated,
+    )
+    .expect("write groups.rs");
+
     println!("cargo:rerun-if-env-changed=UNITY_DIR");
     println!("cargo:rerun-if-changed={}", tests.display());
     println!("cargo:rerun-if-changed={}", api_tests.display());

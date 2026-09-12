@@ -27,16 +27,16 @@ TEST_SETUP(LegacyApi) {}
 
 TEST_TEAR_DOWN(LegacyApi) {}
 
-/* These bodies report a deliberate skip as TEST_SKIP rather than failing. */
+/* These bodies report a deliberate skip as API_TEST_SKIP rather than failing. */
 #define BRIDGE_TEST(name, fn)                                                  \
     TEST(LegacyApi, name)                                                        \
     {                                                                          \
         int rc = fn();                                                         \
-        if (rc == TEST_SKIP)                                                   \
+        if (rc == API_TEST_SKIP)                                               \
         {                                                                      \
             TEST_IGNORE_MESSAGE("skipped by the test body");                   \
         }                                                                      \
-        TEST_ASSERT_EQUAL_INT_MESSAGE(TEST_PASS, rc,                           \
+        TEST_ASSERT_EQUAL_INT_MESSAGE(API_TEST_PASS, rc,                       \
                                       "failing assertion printed to stderr");  \
     }
 
@@ -51,9 +51,6 @@ BRIDGE_TEST(connect, test_sr_connect)
 BRIDGE_TEST(create, test_sr_create)
 BRIDGE_TEST(delete, test_sr_delete)
 BRIDGE_TEST(export, test_sr_export)
-BRIDGE_TEST(free_arr, test_sr_free_arr)
-BRIDGE_TEST(free_object, test_sr_free_object)
-BRIDGE_TEST(free_string, test_sr_free_string)
 BRIDGE_TEST(health, test_sr_health)
 BRIDGE_TEST(import, test_sr_import)
 BRIDGE_TEST(insert, test_sr_insert)
@@ -61,6 +58,7 @@ BRIDGE_TEST(insert_relation, test_sr_insert_relation)
 BRIDGE_TEST(invalidate, test_sr_invalidate)
 BRIDGE_TEST(kill, test_sr_kill)
 BRIDGE_TEST(merge, test_sr_merge)
+BRIDGE_TEST(object_free, test_sr_object_free)
 BRIDGE_TEST(object_get, test_sr_object_get)
 BRIDGE_TEST(object_insert, test_sr_object_insert)
 BRIDGE_TEST(object_insert_double, test_sr_object_insert_double)
@@ -86,6 +84,7 @@ BRIDGE_TEST(signin, test_sr_signin)
 BRIDGE_TEST(signup, test_sr_signup)
 BRIDGE_TEST(stream_kill, test_sr_stream_kill)
 BRIDGE_TEST(stream_next, test_sr_stream_next)
+BRIDGE_TEST(string_free, test_sr_string_free)
 BRIDGE_TEST(surreal_disconnect, test_sr_surreal_disconnect)
 BRIDGE_TEST(surreal_rpc_execute, test_sr_surreal_rpc_execute)
 BRIDGE_TEST(surreal_rpc_free, test_sr_surreal_rpc_free)
@@ -119,6 +118,7 @@ BRIDGE_TEST(value_print, test_sr_value_print)
 BRIDGE_TEST(value_string, test_sr_value_string)
 BRIDGE_TEST(value_thing, test_sr_value_thing)
 BRIDGE_TEST(value_uuid, test_sr_value_uuid)
+BRIDGE_TEST(values_free, test_sr_values_free)
 BRIDGE_TEST(version, test_sr_version)
 
 TEST_GROUP_RUNNER(LegacyApi)
@@ -134,9 +134,6 @@ TEST_GROUP_RUNNER(LegacyApi)
     RUN_TEST_CASE(LegacyApi, create);
     RUN_TEST_CASE(LegacyApi, delete);
     RUN_TEST_CASE(LegacyApi, export);
-    RUN_TEST_CASE(LegacyApi, free_arr);
-    RUN_TEST_CASE(LegacyApi, free_object);
-    RUN_TEST_CASE(LegacyApi, free_string);
     RUN_TEST_CASE(LegacyApi, health);
     RUN_TEST_CASE(LegacyApi, import);
     RUN_TEST_CASE(LegacyApi, insert);
@@ -144,6 +141,7 @@ TEST_GROUP_RUNNER(LegacyApi)
     RUN_TEST_CASE(LegacyApi, invalidate);
     RUN_TEST_CASE(LegacyApi, kill);
     RUN_TEST_CASE(LegacyApi, merge);
+    RUN_TEST_CASE(LegacyApi, object_free);
     RUN_TEST_CASE(LegacyApi, object_get);
     RUN_TEST_CASE(LegacyApi, object_insert);
     RUN_TEST_CASE(LegacyApi, object_insert_double);
@@ -169,6 +167,7 @@ TEST_GROUP_RUNNER(LegacyApi)
     RUN_TEST_CASE(LegacyApi, signup);
     RUN_TEST_CASE(LegacyApi, stream_kill);
     RUN_TEST_CASE(LegacyApi, stream_next);
+    RUN_TEST_CASE(LegacyApi, string_free);
     RUN_TEST_CASE(LegacyApi, surreal_disconnect);
     RUN_TEST_CASE(LegacyApi, surreal_rpc_execute);
     RUN_TEST_CASE(LegacyApi, surreal_rpc_free);
@@ -202,5 +201,6 @@ TEST_GROUP_RUNNER(LegacyApi)
     RUN_TEST_CASE(LegacyApi, value_string);
     RUN_TEST_CASE(LegacyApi, value_thing);
     RUN_TEST_CASE(LegacyApi, value_uuid);
+    RUN_TEST_CASE(LegacyApi, values_free);
     RUN_TEST_CASE(LegacyApi, version);
 }

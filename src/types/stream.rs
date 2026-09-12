@@ -27,23 +27,19 @@ impl Stream {
 }
 
 impl Stream {
-    /// Blocks until next item is received on stream
-    /// will return 1 and write notification to notification_ptr if received
-    /// will return SR_NONE if the stream is closed
+    /// Get the next notification, blocking until one arrives
     ///
-    /// sr_stream_t *stream;
-    /// if (sr_select_live(db, &err, &stream, "foo") < 0)
-    /// {
-    ///     printf("%s", err);
-    ///     return 1;
-    /// }
+    /// # Blocking and shutdown
     ///
-    /// sr_notification_t not ;
-    /// if (sr_stream_next(stream, &not ) > 0)
-    /// {
-    ///     sr_print_notification(&not );
-    /// }
-    /// sr_stream_kill(stream);
+    /// This call blocks until a notification is available; there is no timeout or
+    /// non-blocking variant. It is intended to be driven from a dedicated thread
+    /// rather than a latency-sensitive one.
+    ///
+    /// To retire that thread, free the connection the stream came from. Doing so
+    /// drops the sending half of the notification channel, and a reader parked
+    /// inside this function returns SR_CLOSED. The stream itself stays valid and
+    /// must still be freed. Freeing the connection is the only way to release a
+    /// blocked reader.
     #[export_name = "sr_stream_next"]
     pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
         match self.rt.block_on(self.inner.next()) {
@@ -86,13 +82,19 @@ impl RpcStream {
     pub fn new(rx: Receiver<PublicNotification>) -> Self {
         RpcStream { rx }
     }
-
-    /// Get the next notification from the stream
+    /// Get the next notification, blocking until one arrives
     ///
-    /// Returns the length of the CBOR-encoded notification, or SR_CLOSED if the
-    /// channel is closed. The CBOR-encoded bytes are written to *res_ptr.
+    /// # Blocking and shutdown
     ///
-    /// Free the result with sr_free_byte_arr.
+    /// This call blocks until a notification is available; there is no timeout or
+    /// non-blocking variant. It is intended to be driven from a dedicated thread
+    /// rather than a latency-sensitive one.
+    ///
+    /// To retire that thread, free the connection the stream came from. Doing so
+    /// drops the sending half of the notification channel, and a reader parked
+    /// inside this function returns SR_CLOSED. The stream itself stays valid and
+    /// must still be freed. Freeing the connection is the only way to release a
+    /// blocked reader.
     #[export_name = "sr_rpc_stream_next"]
     pub extern "C" fn next(&mut self, res_ptr: *mut *mut u8) -> c_int {
         let notification = match self.rx.recv_blocking() {

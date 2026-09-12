@@ -33,7 +33,7 @@
     do { \
         if (result < 0) { \
             printf("ERROR: %s - %s\n", msg, err ? err : "Unknown error"); \
-            if (err) sr_free_string(err); \
+            if (err) sr_string_free(err); \
             if (db) sr_surreal_disconnect(db); \
             return 1; \
         } \
@@ -112,8 +112,8 @@ int main(void) {
     result = sr_create(db, &err, &plan_free_result, "plan:free", &plan_free);
     CHECK_ERROR(result, err, "Failed to create free plan");
     printf("  [OK] Created plan: Free ($0/mo, 3 users, 1GB storage)\n");
-    if (plan_free_result) sr_free_object(*plan_free_result);
-    sr_free_object(plan_free);
+    if (plan_free_result) sr_object_free(*plan_free_result);
+    sr_object_free(plan_free);
     
     // Starter Plan
     sr_object_t plan_starter = sr_object_new();
@@ -128,8 +128,8 @@ int main(void) {
     result = sr_create(db, &err, &plan_starter_result, "plan:starter", &plan_starter);
     CHECK_ERROR(result, err, "Failed to create starter plan");
     printf("  [OK] Created plan: Starter ($29/mo, 10 users, 25GB storage)\n");
-    if (plan_starter_result) sr_free_object(*plan_starter_result);
-    sr_free_object(plan_starter);
+    if (plan_starter_result) sr_object_free(*plan_starter_result);
+    sr_object_free(plan_starter);
     
     // Pro Plan
     sr_object_t plan_pro = sr_object_new();
@@ -144,8 +144,8 @@ int main(void) {
     result = sr_create(db, &err, &plan_pro_result, "plan:pro", &plan_pro);
     CHECK_ERROR(result, err, "Failed to create pro plan");
     printf("  [OK] Created plan: Pro ($99/mo, 50 users, 100GB storage)\n");
-    if (plan_pro_result) sr_free_object(*plan_pro_result);
-    sr_free_object(plan_pro);
+    if (plan_pro_result) sr_object_free(*plan_pro_result);
+    sr_object_free(plan_pro);
     
     // Enterprise Plan
     sr_object_t plan_enterprise = sr_object_new();
@@ -160,8 +160,8 @@ int main(void) {
     result = sr_create(db, &err, &plan_enterprise_result, "plan:enterprise", &plan_enterprise);
     CHECK_ERROR(result, err, "Failed to create enterprise plan");
     printf("  [OK] Created plan: Enterprise ($499/mo, unlimited users, 1TB storage)\n");
-    if (plan_enterprise_result) sr_free_object(*plan_enterprise_result);
-    sr_free_object(plan_enterprise);
+    if (plan_enterprise_result) sr_object_free(*plan_enterprise_result);
+    sr_object_free(plan_enterprise);
 
     // ========================================================================
     // Step 3: Create Platform Features
@@ -189,8 +189,8 @@ int main(void) {
         result = sr_create(db, &err, &feature_result, features[i][0], &feature);
         CHECK_ERROR(result, err, "Failed to create feature");
         printf("  [OK] Created feature: %s (requires %s plan)\n", features[i][1], features[i][3]);
-        if (feature_result) sr_free_object(*feature_result);
-        sr_free_object(feature);
+        if (feature_result) sr_object_free(*feature_result);
+        sr_object_free(feature);
     }
 
     // ========================================================================
@@ -211,8 +211,8 @@ int main(void) {
     result = sr_create(db, &err, &org1_result, "organization:techstartup", &org1);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: TechStartup Inc (Technology, USA)\n");
-    if (org1_result) sr_free_object(*org1_result);
-    sr_free_object(org1);
+    if (org1_result) sr_object_free(*org1_result);
+    sr_object_free(org1);
     
     // Organization 2: GlobalCorp
     sr_object_t org2 = sr_object_new();
@@ -227,8 +227,8 @@ int main(void) {
     result = sr_create(db, &err, &org2_result, "organization:globalcorp", &org2);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: GlobalCorp (Finance, UK)\n");
-    if (org2_result) sr_free_object(*org2_result);
-    sr_free_object(org2);
+    if (org2_result) sr_object_free(*org2_result);
+    sr_object_free(org2);
     
     // Organization 3: LocalBiz
     sr_object_t org3 = sr_object_new();
@@ -243,8 +243,8 @@ int main(void) {
     result = sr_create(db, &err, &org3_result, "organization:localbiz", &org3);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: LocalBiz (Retail, Canada) [TRIAL]\n");
-    if (org3_result) sr_free_object(*org3_result);
-    sr_free_object(org3);
+    if (org3_result) sr_object_free(*org3_result);
+    sr_object_free(org3);
 
     // ========================================================================
     // Step 5: Create Users
@@ -282,8 +282,8 @@ int main(void) {
         result = sr_create(db, &err, &user_result, users[i].id, &user);
         CHECK_ERROR(result, err, "Failed to create user");
         printf("  [OK] Created user: %s (%s)\n", users[i].name, users[i].email);
-        if (user_result) sr_free_object(*user_result);
-        sr_free_object(user);
+        if (user_result) sr_object_free(*user_result);
+        sr_object_free(user);
     }
 
     // ========================================================================
@@ -318,8 +318,8 @@ int main(void) {
         CHECK_ERROR(result, err, "Failed to create membership relation");
         printf("  [OK] %s -[member_of {role: %s}]-> %s\n", 
                memberships[i].user, memberships[i].role, memberships[i].org);
-        if (rel_result) sr_free_arr(rel_result, result);
-        sr_free_object(content);
+        if (rel_result) sr_values_free(rel_result, result);
+        sr_object_free(content);
     }
 
     // ========================================================================
@@ -337,8 +337,8 @@ int main(void) {
     result = sr_relate(db, &err, &sub1_result, "organization:techstartup", "subscribes_to", "plan:pro", &sub1);
     CHECK_ERROR(result, err, "Failed to create subscription");
     printf("  [OK] TechStartup Inc -[subscribes_to]-> Pro Plan ($99/mo)\n");
-    if (sub1_result) sr_free_arr(sub1_result, result);
-    sr_free_object(sub1);
+    if (sub1_result) sr_values_free(sub1_result, result);
+    sr_object_free(sub1);
     
     // GlobalCorp subscribes to Enterprise plan
     sr_object_t sub2 = sr_object_new();
@@ -350,8 +350,8 @@ int main(void) {
     result = sr_relate(db, &err, &sub2_result, "organization:globalcorp", "subscribes_to", "plan:enterprise", &sub2);
     CHECK_ERROR(result, err, "Failed to create subscription");
     printf("  [OK] GlobalCorp -[subscribes_to]-> Enterprise Plan ($499/mo, annual)\n");
-    if (sub2_result) sr_free_arr(sub2_result, result);
-    sr_free_object(sub2);
+    if (sub2_result) sr_values_free(sub2_result, result);
+    sr_object_free(sub2);
     
     // LocalBiz subscribes to Free plan (trial)
     sr_object_t sub3 = sr_object_new();
@@ -363,8 +363,8 @@ int main(void) {
     result = sr_relate(db, &err, &sub3_result, "organization:localbiz", "subscribes_to", "plan:free", &sub3);
     CHECK_ERROR(result, err, "Failed to create subscription");
     printf("  [OK] LocalBiz -[subscribes_to]-> Free Plan (trial)\n");
-    if (sub3_result) sr_free_arr(sub3_result, result);
-    sr_free_object(sub3);
+    if (sub3_result) sr_values_free(sub3_result, result);
+    sr_object_free(sub3);
 
     // ========================================================================
     // Step 8: Create Usage Records
@@ -404,7 +404,7 @@ int main(void) {
         sr_object_t* usage_result = NULL;
         result = sr_insert(db, &err, (sr_value_t**)&usage_result, "usage", &usage);
         CHECK_ERROR(result, err, "Failed to create usage record");
-        sr_free_object(usage);
+        sr_object_free(usage);
     }
     printf("  [OK] Created 13 usage records (api_calls, storage_mb, active_users)\n");
 
@@ -423,7 +423,7 @@ int main(void) {
     result = sr_query(db, &err, &q1_results, query1, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q1_results, result);
-    sr_free_arr_res_arr(q1_results, result);
+    sr_arr_res_arr_free(q1_results, result);
 
     // ========================================================================
     // Step 10: Query - Users and Their Organizations via Graph Traversal
@@ -440,7 +440,7 @@ int main(void) {
     result = sr_query(db, &err, &q2_results, query2, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q2_results, result);
-    sr_free_arr_res_arr(q2_results, result);
+    sr_arr_res_arr_free(q2_results, result);
 
     // ========================================================================
     // Step 11: Query - Monthly Revenue Calculation
@@ -457,7 +457,7 @@ int main(void) {
     result = sr_query(db, &err, &q3_results, query3, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q3_results, result);
-    sr_free_arr_res_arr(q3_results, result);
+    sr_arr_res_arr_free(q3_results, result);
 
     // ========================================================================
     // Step 12: Query - API Usage by Organization for March 2024
@@ -475,7 +475,7 @@ int main(void) {
     result = sr_query(db, &err, &q4_results, query4, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q4_results, result);
-    sr_free_arr_res_arr(q4_results, result);
+    sr_arr_res_arr_free(q4_results, result);
 
     // ========================================================================
     // Step 13: Query - Find Admins Across All Organizations
@@ -493,7 +493,7 @@ int main(void) {
     result = sr_query(db, &err, &q5_results, query5, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q5_results, result);
-    sr_free_arr_res_arr(q5_results, result);
+    sr_arr_res_arr_free(q5_results, result);
 
     // ========================================================================
     // Step 14: Upgrade LocalBiz from Free to Starter Plan
@@ -505,7 +505,7 @@ int main(void) {
     sr_arr_res_t* del_results = NULL;
     result = sr_query(db, &err, &del_results, delete_sub, NULL);
     CHECK_ERROR(result, err, "Failed to delete old subscription");
-    sr_free_arr_res_arr(del_results, result);
+    sr_arr_res_arr_free(del_results, result);
     printf("  [OK] Removed old Free plan subscription\n");
     
     // Create new subscription to Starter plan
@@ -519,8 +519,8 @@ int main(void) {
     result = sr_relate(db, &err, &new_sub_result, "organization:localbiz", "subscribes_to", "plan:starter", &new_sub);
     CHECK_ERROR(result, err, "Failed to create new subscription");
     printf("  [OK] LocalBiz upgraded: Free -> Starter ($29/mo)\n");
-    if (new_sub_result) sr_free_arr(new_sub_result, result);
-    sr_free_object(new_sub);
+    if (new_sub_result) sr_values_free(new_sub_result, result);
+    sr_object_free(new_sub);
     
     // Update organization status from trial to active
     sr_object_t status_update = sr_object_new();
@@ -530,8 +530,8 @@ int main(void) {
     result = sr_merge(db, &err, &update_result, "organization:localbiz", &status_update);
     CHECK_ERROR(result, err, "Failed to update organization status");
     printf("  [OK] LocalBiz status updated: trial -> active\n");
-    if (update_result) sr_free_arr(update_result, result);
-    sr_free_object(status_update);
+    if (update_result) sr_values_free(update_result, result);
+    sr_object_free(status_update);
 
     // ========================================================================
     // Step 15: Final Revenue Check After Upgrade
@@ -548,7 +548,7 @@ int main(void) {
     result = sr_query(db, &err, &q6_results, query6, NULL);
     CHECK_ERROR(result, err, "Failed to execute query");
     print_query_results(q6_results, result);
-    sr_free_arr_res_arr(q6_results, result);
+    sr_arr_res_arr_free(q6_results, result);
 
     // ========================================================================
     // Step 16: Cleanup - Delete all data
@@ -569,7 +569,7 @@ int main(void) {
         sr_arr_res_t* cleanup_results = NULL;
         result = sr_query(db, &err, &cleanup_results, cleanup_queries[i], NULL);
         CHECK_ERROR(result, err, "Failed to cleanup");
-        sr_free_arr_res_arr(cleanup_results, result);
+        sr_arr_res_arr_free(cleanup_results, result);
     }
     printf("  [OK] All data cleaned up\n");
 
