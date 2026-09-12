@@ -3,9 +3,13 @@ name = "surrealdb_c"
 version = "0.1.0"
 edition = "2021"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
-description = "WebAssembly driver for SurrealDB"
-repository = "https://github.com/surrealdb/surrealdb.wasm"
+description = "The official SurrealDB SDK for C"
+repository = "https://github.com/surrealdb/surrealdb.c"
 license = "Apache License 2.0"
+
+[workspace]
+members = ["c-tests"]
+default-members = ["."]
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
@@ -29,9 +33,7 @@ ciborium = "0.2.2"
 arc-swap = "1.8.0"
 serde = { version = "1.0.228", features = ["serde_derive"] }
 geo-types = "0.7.18"
-cc = "1.0"
 rust_decimal = "1.36"
 
 [build-dependencies]
 cbindgen = "0.29.2"
-cc = "1.0"

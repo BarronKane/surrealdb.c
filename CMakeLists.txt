@@ -20,6 +20,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/helpers.cmake)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+# Without this clangd cannot resolve unity_fixture.h or any sr_* symbol when
+# editing c_test/**, and the whole test tree reads as errors while compiling fine.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_FOLDER "surrealdb.c")
 
 # Build options
@@ -233,20 +237,25 @@ add_dependencies(surrealdb_c rust_lib)
 # This allows examples and tests to use surrealdb::surrealdb_c just like external consumers
 add_library(surrealdb::surrealdb_c ALIAS surrealdb_c)
 
-# Platform-specific system libraries required by the Rust library
+# Platform-specific system libraries required by the Rust library.
+#
+# Defined once and consumed both by the in-tree target below and by
+# surrealdb_cConfig.cmake.in, which is configured with this variable. Keeping
+# two copies previously left the installed package under-linked on every
+# platform except Windows.
 if(WIN32)
-    set_target_properties(surrealdb_c PROPERTIES
-        INTERFACE_LINK_LIBRARIES "ws2_32;userenv;bcrypt;ntdll;pdh;netapi32;iphlpapi;psapi;propsys;runtimeobject;secur32;powrprof"
-    )
+    set(SURREALDB_C_SYSTEM_LIBS "ws2_32;userenv;bcrypt;ntdll;pdh;netapi32;iphlpapi;psapi;propsys;runtimeobject;secur32;powrprof")
 elseif(APPLE)
-    set_target_properties(surrealdb_c PROPERTIES
-        INTERFACE_LINK_LIBRARIES "-framework Security;-framework SystemConfiguration;-framework CoreFoundation;-framework IOKit;-lobjc"
-    )
+    set(SURREALDB_C_SYSTEM_LIBS "-framework Security;-framework SystemConfiguration;-framework CoreFoundation;-framework IOKit;-lobjc")
 elseif(UNIX)
-    set_target_properties(surrealdb_c PROPERTIES
-        INTERFACE_LINK_LIBRARIES "m;dl;pthread;rt"
-    )
+    set(SURREALDB_C_SYSTEM_LIBS "m;dl;pthread;rt")
+else()
+    set(SURREALDB_C_SYSTEM_LIBS "")
 endif()
+
+set_target_properties(surrealdb_c PROPERTIES
+    INTERFACE_LINK_LIBRARIES "${SURREALDB_C_SYSTEM_LIBS}"
+)
 
 if(_sdb_is_multi_config AND NOT _sdb_force_release)
     message(STATUS "SurrealDB static library (debug): ${_sdb_static_lib_debug}")

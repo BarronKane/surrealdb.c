@@ -641,6 +641,14 @@ int sr_health(const struct sr_surreal_t *db, sr_string_t *err_ptr);
  *
  * Imports data from a file into the current namespace and database.
  *
+ * As of SurrealDB 3.x the file **must** begin with `OPTION IMPORT;`. That
+ * statement disables events, live queries, field processing and per-row
+ * result output for import performance, and the server rejects the import
+ * outright without it. Note that exported files are not prefixed with it
+ * automatically, so a file produced by `sr_export` needs the line added
+ * before it can be fed back through `sr_import`. To run statements with
+ * full side effects, use `sr_query` instead.
+ *
  * # Safety
  *
  * - `db` must be a valid pointer to a Surreal connection
@@ -650,6 +658,7 @@ int sr_health(const struct sr_surreal_t *db, sr_string_t *err_ptr);
  * # Examples
  *
  * ```c
+ * // backup.surql must start with: OPTION IMPORT;
  * sr_surreal_t *db;
  * sr_string_t err;
  * if (sr_import(db, &err, "backup.surql") < 0) {

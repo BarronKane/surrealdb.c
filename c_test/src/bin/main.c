@@ -1,40 +1,23 @@
+/*
+ * C driver for the test corpus.
+ *
+ * The group list lives in runner.c so that the Rust driver in c-tests/ runs the
+ * same corpus without duplicating it. Accepts the usual Unity Fixture options,
+ * so `test_runner -g CRUD` runs a single group — which is how CTest registers
+ * one test per group.
+ */
+
+#include <stdio.h>
+
 #include "unity_fixture.h"
 
-// Declare all test group runners (defined in respective test .c files)
-extern void RunTestGroup_Connection(void);
-extern void RunTestGroup_Transaction(void);
-extern void RunTestGroup_CRUD(void);
-extern void RunTestGroup_Query(void);
-extern void RunTestGroup_IO(void);
-extern void RunTestGroup_Auth(void);
-extern void RunTestGroup_Variable(void);
-extern void RunTestGroup_RPC(void);
-extern void RunTestGroup_Stream(void);
-extern void RunTestGroup_Object(void);
-extern void RunTestGroup_Memory(void);
-extern void RunTestGroup_Utility(void);
+void sr_run_all_test_groups(void);
 
-static void runAllTests(void) {
+int main(int argc, const char *argv[])
+{
     printf("=============================================================\n");
     printf("SurrealDB C API Test Suite (Unity Fixture Framework)\n");
     printf("=============================================================\n\n");
-    
-    RUN_TEST_GROUP(Connection);
-    RUN_TEST_GROUP(Transaction);
-    RUN_TEST_GROUP(CRUD);
-    RUN_TEST_GROUP(Query);
-    RUN_TEST_GROUP(IO);
-    RUN_TEST_GROUP(Auth);
-    RUN_TEST_GROUP(Variable);
-    RUN_TEST_GROUP(RPC);
-    RUN_TEST_GROUP(Stream);
-    RUN_TEST_GROUP(Object);
-    RUN_TEST_GROUP(Memory);
-    RUN_TEST_GROUP(Utility);
-    
-    printf("\n=============================================================\n");
-}
 
-int main(int argc, const char* argv[]) {
-    return UnityMain(argc, argv, runAllTests);
+    return UnityMain(argc, argv, sr_run_all_test_groups);
 }

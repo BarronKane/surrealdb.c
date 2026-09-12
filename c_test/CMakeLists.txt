@@ -14,20 +14,9 @@ set(_test_bin_dir "${CMAKE_CURRENT_BINARY_DIR}/bin")
 # Test Source Files (Unity Fixture based)
 # ============================================================================
 
-set(TEST_SOURCES
-    src/tests/connection_tests.c
-    src/tests/transaction_tests.c
-    src/tests/crud_tests.c
-    src/tests/query_tests.c
-    src/tests/io_tests.c
-    src/tests/auth_tests.c
-    src/tests/variable_tests.c
-    src/tests/rpc_tests.c
-    src/tests/stream_tests.c
-    src/tests/object_tests.c
-    src/tests/memory_tests.c
-    src/tests/utility_tests.c
-)
+# Discovered rather than listed: c-tests/build.rs globs the same directory, and
+# a hand-maintained list here would drift from it.
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/tests/*.c")
 
 # API Tests - individual test implementations
 set(API_TEST_SOURCES
@@ -40,6 +29,7 @@ set(API_TEST_SOURCES
 
 add_executable(test_runner
     src/bin/main.c
+    src/bin/runner.c
     ${TEST_SOURCES}
     ${API_TEST_SOURCES}
 )
@@ -96,10 +86,29 @@ endif()
 # ============================================================================
 
 enable_testing()
-add_test(NAME surrealdb_c_tests COMMAND test_runner)
-set_tests_properties(surrealdb_c_tests PROPERTIES
-    WORKING_DIRECTORY "${_test_bin_dir}"
-)
+
+# One test per Unity group rather than a single all-or-nothing entry, so CI
+# reports which group failed. Group names are read back out of the corpus.
+set(_sdb_test_groups "")
+foreach(_src IN LISTS TEST_SOURCES)
+    file(STRINGS "${_src}" _runners REGEX "^TEST_GROUP_RUNNER\\(")
+    foreach(_line IN LISTS _runners)
+        string(REGEX REPLACE "^TEST_GROUP_RUNNER\\(([A-Za-z0-9_]+)\\).*" "\\1" _group "${_line}")
+        list(APPEND _sdb_test_groups "${_group}")
+    endforeach()
+endforeach()
+list(REMOVE_DUPLICATES _sdb_test_groups)
+list(SORT _sdb_test_groups)
+
+foreach(_group IN LISTS _sdb_test_groups)
+    add_test(NAME "surrealdb_c.${_group}" COMMAND test_runner -g "${_group}" -v)
+    set_tests_properties("surrealdb_c.${_group}" PROPERTIES
+        WORKING_DIRECTORY "${_test_bin_dir}"
+    )
+endforeach()
+
+list(LENGTH _sdb_test_groups _sdb_group_count)
+message(STATUS "Registered ${_sdb_group_count} test groups with CTest")
 
 message(STATUS "Test binaries will be output to: ${_test_bin_dir}")
 message(STATUS "Unity Fixture extension enabled for test suites")

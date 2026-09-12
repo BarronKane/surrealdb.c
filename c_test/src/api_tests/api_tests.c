@@ -43,6 +43,26 @@ static int setup_db(sr_surreal_t **db) {
     return TEST_PASS;
 }
 
+/*
+ * Create rows so that a table exists before it is selected from.
+ *
+ * SurrealDB 3.x rejects SELECT against a table that has never been written to
+ * ("The table 'x' does not exist"), where 2.x returned an empty result.
+ */
+static int seed_table(sr_surreal_t *db, const char *statement) {
+    sr_string_t err;
+    sr_arr_res_t *res;
+
+    int n = sr_query(db, &err, &res, statement, NULL);
+    if (n < 0) {
+        fprintf(stderr, "Failed to seed table: %s\n", err);
+        sr_free_string(err);
+        return TEST_FAIL;
+    }
+    sr_free_arr_res_arr(res, n);
+    return TEST_PASS;
+}
+
 /* ============================================================================
  * Connection Tests
  * ============================================================================ */
@@ -291,6 +311,11 @@ int test_sr_select(void) {
     sr_string_t err;
     sr_value_t *results;
     
+    if (seed_table(db, "CREATE items:1 SET name = 'a'") != TEST_PASS) {
+        sr_surreal_disconnect(db);
+        return TEST_FAIL;
+    }
+
     int len = sr_select(db, &err, &results, "items");
     ASSERT_GE(len, 0);
     
@@ -683,6 +708,11 @@ int test_sr_select_live(void) {
     sr_string_t err;
     sr_stream_t *stream;
     
+    if (seed_table(db, "CREATE items:1 SET name = 'a'") != TEST_PASS) {
+        sr_surreal_disconnect(db);
+        return TEST_FAIL;
+    }
+
     int res = sr_select_live(db, &err, &stream, "items");
     ASSERT_GE(res, 0);
     ASSERT_NOT_NULL(stream);
@@ -1015,12 +1045,22 @@ int test_sr_free_arr(void) {
     sr_string_t err;
     sr_value_t *results;
     
-    int len = sr_select(db, &err, &results, "nonexistent_table");
-    ASSERT_GE(len, 0);
-    
-    if (len > 0) {
-        sr_free_arr(results, len);
+    /*
+     * Seeded so the select returns rows and sr_free_arr is actually reached.
+     * This previously selected a table that did not exist, so the free under
+     * test never ran even when the test reported a pass.
+     */
+    if (seed_table(db, "CREATE freeable:1 SET n = 1; CREATE freeable:2 SET n = 2")
+        != TEST_PASS) {
+        sr_surreal_disconnect(db);
+        return TEST_FAIL;
     }
+
+    int len = sr_select(db, &err, &results, "freeable");
+    ASSERT_GE(len, 0);
+    ASSERT_TRUE(len > 0);
+
+    sr_free_arr(results, len);
     
     sr_surreal_disconnect(db);
     return TEST_PASS;

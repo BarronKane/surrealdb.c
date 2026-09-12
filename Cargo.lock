@@ -4126,6 +4126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "surrealdb-c-tests"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "surrealdb_c",
+]
+
+[[package]]
 name = "surrealdb-collections"
 version = "3.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4319,7 +4327,6 @@ dependencies = [
  "arc-swap",
  "async-channel",
  "cbindgen",
- "cc",
  "chrono",
  "ciborium",
  "futures",
