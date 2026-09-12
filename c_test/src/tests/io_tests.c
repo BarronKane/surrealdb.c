@@ -63,6 +63,8 @@ TEST(IO, Import) {
     if (f == NULL) {
         TEST_FAIL_MESSAGE("Could not create import test file");
     }
+    // SurrealDB 3.x rejects an import whose first statement is not OPTION IMPORT.
+    fprintf(f, "OPTION IMPORT;\n");
     fprintf(f, "CREATE import_test:1 SET name = 'imported';\n");
     fclose(f);
     
