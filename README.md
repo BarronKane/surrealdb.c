@@ -33,31 +33,69 @@ The official SurrealDB SDK for C.
 
 ## Getting started
 
-> [!WARNING]
-> There is an issue with cbindgen which causes incorrect ordering of header files, so linking may fail.\
-> This should be fixed soon, or can be worked around by using a published header file or manually reordering
-> see: https://github.com/mozilla/cbindgen/issues/981
-
-
-
-Connect to an in-memory instance, SurrealKV or remote
-
 ```c
-#include "path/to/surrealdb.h"
+#include "surrealdb.h"
 
 sr_surreal_t *db;
 sr_string_t err;
 
-// connect to server
-char *endpoint = "ws://localhost:8000";
-// connect to file
-char *endpoint = "surrealkv://database.skv";
-
-if (sr_connect(&err, &db, endpoint) < 0)
+// "mem://"                   in-memory
+// "surrealkv://database.skv" local file
+// "ws://localhost:8000"      remote server
+if (sr_connect(&err, &db, "mem://") < 0)
 {
-    printf("failed to connect: %s", err);
+    printf("failed to connect: %s\n", err);
+    sr_string_free(err);
     return 1;
 }
 
+sr_use_ns(db, &err, "test");
+sr_use_db(db, &err, "test");
+
 sr_surreal_disconnect(db);
 ```
+
+Calls return a negative status on failure — `SR_ERROR`, `SR_CLOSED` or
+`SR_FATAL` — and write a message to `err_ptr` for the caller to release with
+`sr_string_free`. Anything a `sr_*_new` or `sr_value_*` constructor hands back
+is released by the matching `sr_*_free`.
+
+Requires SurrealDB 3.2.
+
+## Building
+
+```sh
+cargo build --release
+```
+
+Produces `target/release/libsurrealdb_c.a` and writes `include/surrealdb.h`;
+
+Include the header and link the archive.
+
+```sh
+cc app.c -Iinclude target/release/libsurrealdb_c.a -lm -ldl -lpthread     # Linux
+```
+
+On macOS, replace the trailing libraries with `-framework Security
+-framework SystemConfiguration -framework CoreFoundation -framework IOKit
+-lobjc`. Link the archive by path rather than with `-lsurrealdb_c`, which would
+otherwise find the shared library built alongside it.
+
+### CMake
+
+Only needed to install the library or to build the tests.
+
+```sh
+cmake -S . -B build && cmake --build build
+cmake --install build --prefix /usr/local
+ctest --test-dir build
+```
+
+Consumers then get the include path and the platform libraries for free:
+
+```cmake
+find_package(surrealdb_c REQUIRED)
+target_link_libraries(myapp PRIVATE surrealdb::surrealdb_c)
+```
+
+Needs CMake 3.21 or newer and a C23 compiler.
