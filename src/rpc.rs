@@ -1,16 +1,16 @@
 use std::{
     ffi::{c_char, c_int, CStr},
-    future::IntoFuture,
     panic::{catch_unwind, AssertUnwindSafe},
     ptr::slice_from_raw_parts,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use std::sync::Arc;
+use async_channel::Receiver;
 use surrealdb_core::dbs::Session;
-use surrealdb_core::kvs::Datastore;
+use surrealdb_core::kvs::{Builder, Datastore};
 use surrealdb_core::rpc::{Method, RpcProtocol, DbResult};
-use surrealdb::types::{Value as sdbValue, HashMap};
+use surrealdb::types::{Value as sdbValue, HashMap, Notification as PublicNotification};
 use tokio::{runtime::Runtime, sync::RwLock};
 
 use crate::{array::MakeArray, opts::Options, stream::RpcStream, string::string_t, SR_ERROR, SR_FATAL};
@@ -55,32 +55,42 @@ impl SurrealRpc {
                 return Err("error creating runtime".into());
             };
 
-            let con_fut = Datastore::new(endpoint);
+            // As of SurrealDB 3.1, the caller owns the notification channel: the
+            // datastore no longer hands one back via `Datastore::notifications()`.
+            let (notify_tx, notify_rx) = async_channel::unbounded::<PublicNotification>();
 
-            let mut kvs = match rt.block_on(con_fut.into_future()) {
-                Ok(db) => db,
-                Err(e) => return Err(e.to_string().into()),
-            };
-
-            kvs = kvs.with_notifications();
+            let mut builder = Builder::new().with_notify(notify_tx);
 
             if options.query_timeout != 0 {
-                kvs =
-                    kvs.with_query_timeout(Some(Duration::from_secs(options.query_timeout as u64)))
+                builder = builder
+                    .with_query_timeout(Some(Duration::from_secs(options.query_timeout as u64)))
             }
             if options.transaction_timeout != 0 {
-                kvs = kvs.with_transaction_timeout(Some(Duration::from_secs(
+                builder = builder.with_transaction_timeout(Some(Duration::from_secs(
                     options.transaction_timeout as u64,
                 )))
             }
 
+            let kvs = match rt.block_on(builder.build_with_path(endpoint)) {
+                Ok(db) => Arc::new(db),
+                Err(e) => return Err(e.to_string().into()),
+            };
+
+            // Sessions are keyed by a real `Uuid` as of 3.1 — there is deliberately
+            // no type-level "default session" any more (GHSA-4vgr-h27g-cf9p), so we
+            // mint one and hold onto its id.
+            let default_session_id = uuid::Uuid::new_v4();
             let session_map = HashMap::default();
-            let default_session = Arc::new(RwLock::new(Session::default().with_rt(true)));
-            session_map.insert(None, default_session);
+            session_map.insert(
+                default_session_id,
+                Arc::new(RwLock::new(Session::default().with_rt(true))),
+            );
 
             let inner = SurrealRpcInner {
                 kvs,
                 session_map,
+                notify_rx,
+                default_session: default_session_id,
             };
 
             Ok(SurrealRpc {
@@ -157,9 +167,12 @@ impl SurrealRpc {
             let method = Method::parse_case_insensitive(&method_str);
 
             let inner = &ctx.inner.read().await;
+            // (txn, session, client_session, method, params) — `session` became a
+            // required `Uuid` in 3.1; requests can no longer run unbound.
             let res = <SurrealRpcInner as RpcProtocol>::execute(
                 &*inner,
                 None,
+                inner.default_session,
                 None,
                 method,
                 params,
@@ -203,13 +216,7 @@ impl SurrealRpc {
             return SR_ERROR;
         }
         with_async(self, err_ptr, |ctx| async {
-            let receiver = ctx
-                .inner
-                .read()
-                .await
-                .kvs
-                .notifications()
-                .ok_or(string_t::from("Notifications not enabled"))?;
+            let receiver = ctx.inner.read().await.notify_rx.clone();
 
             let rpc_stream = RpcStream::new(receiver);
             let stream_boxed = Box::new(rpc_stream);
@@ -344,16 +351,25 @@ where
 
 #[allow(dead_code)]
 struct SurrealRpcInner {
-    kvs: Datastore,
-    session_map: HashMap<Option<uuid::Uuid>, Arc<RwLock<Session>>>,
+    kvs: Arc<Datastore>,
+    session_map: HashMap<uuid::Uuid, Arc<RwLock<Session>>>,
+    /// Receiving half of the live-query notification channel handed to the
+    /// datastore at construction. Cloned out by `sr_surreal_rpc_notifications`.
+    notify_rx: Receiver<PublicNotification>,
+    /// Id of the session every `sr_surreal_rpc_execute` call runs under.
+    default_session: uuid::Uuid,
 }
 
 impl RpcProtocol for SurrealRpcInner {
     fn kvs(&self) -> &Datastore {
-        &self.kvs
+        self.kvs.as_ref()
     }
 
-    fn session_map(&self) -> &HashMap<Option<uuid::Uuid>, Arc<RwLock<Session>>> {
+    fn kvs_arc(&self) -> Arc<Datastore> {
+        self.kvs.clone()
+    }
+
+    fn session_map(&self) -> &HashMap<uuid::Uuid, Arc<RwLock<Session>>> {
         &self.session_map
     }
 
@@ -361,14 +377,21 @@ impl RpcProtocol for SurrealRpcInner {
         let ver_str = surrealdb_core::env::VERSION.to_string();
         DbResult::Other(sdbValue::String(ver_str))
     }
-    
+
     const LQ_SUPPORT: bool = true;
 
-    async fn handle_live(&self, _lqid: &uuid::Uuid, _session_id: Option<uuid::Uuid>) {}
+    async fn handle_live(
+        &self,
+        _lqid: &uuid::Uuid,
+        _session_id: uuid::Uuid,
+        _namespace: Option<String>,
+        _database: Option<String>,
+    ) {
+    }
 
     async fn handle_kill(&self, _lqid: &uuid::Uuid) {}
 
-    async fn cleanup_lqs(&self, _session_id: Option<&uuid::Uuid>) {}
+    async fn cleanup_lqs(&self, _session_id: &uuid::Uuid) {}
 
     async fn cleanup_all_lqs(&self) {}
 }
