@@ -135,9 +135,22 @@ On macOS, replace the trailing libraries with `-framework Security
 -lobjc`. Link the archive by path rather than with `-lsurrealdb_c`, which would
 otherwise find the shared library built alongside it.
 
+### Testing
+
+```sh
+cargo test
+```
+
+Runs the whole C test corpus and every example in `c_test/examples`, with no
+CMake step. The examples are complete programs compiled and run as tests, so
+one that stops building or stops working fails the suite.
+
 ### CMake
 
-Only needed to install the library or to build the tests.
+Not required to build or run anything -- `cargo build` produces the library and
+`cargo test` runs the suite. CMake is optional, for running the same corpus
+under `ctest` and for installing the header and archive so consumers can
+`find_package` them.
 
 ```sh
 cmake -S . -B build && cmake --build build

@@ -49,6 +49,48 @@ fn main() {
 
     build.warnings(false).compile("surrealdb_c_test_corpus");
 
+    // The examples are complete programs with their own `main`. Only CMake
+    // built them before, so `cargo test` -- the path the README now documents
+    // -- could go green while an example no longer compiled or no longer
+    // worked. Each is compiled here with `main` renamed to `<stem>_main` and
+    // driven by a generated #[test], so they are held to the same standard as
+    // the corpus. Both are self-contained against `mem://`.
+    let examples = root.join("c_test/examples");
+    let mut example_stems: Vec<String> = Vec::new();
+    for source in c_sources(&examples) {
+        let stem = source
+            .file_stem()
+            .expect("example file stem")
+            .to_string_lossy()
+            .to_string();
+        cc::Build::new()
+            .include(root.join("include"))
+            .define("main", format!("{stem}_main").as_str())
+            .file(&source)
+            .warnings(false)
+            .compile(&format!("surrealdb_c_example_{stem}"));
+        example_stems.push(stem);
+    }
+
+    let generated_examples: String = example_stems
+        .iter()
+        .map(|stem| {
+            format!(
+                "extern \"C\" {{ fn {stem}_main() -> ::std::os::raw::c_int; }}\n\
+                 #[test]\n\
+                 fn example_{stem}() {{\n\
+                 \x20   let rc = unsafe {{ {stem}_main() }};\n\
+                 \x20   assert_eq!(rc, 0, \"example {stem} exited with {{rc}}\");\n\
+                 }}\n"
+            )
+        })
+        .collect();
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("examples.rs"),
+        generated_examples,
+    )
+    .expect("write examples.rs");
+
     // Emit one #[test] per Unity group, read out of the corpus itself. CMake
     // derives its CTest entries the same way and runner.c is generated from it,
     // so no group list is maintained by hand anywhere.
@@ -86,6 +128,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=UNITY_DIR");
     println!("cargo:rerun-if-changed={}", tests.display());
+    println!("cargo:rerun-if-changed={}", examples.display());
     println!("cargo:rerun-if-changed={}", api_tests.display());
     println!("cargo:rerun-if-changed={}", bin.join("runner.c").display());
     println!(

@@ -57,6 +57,16 @@ mod tests {
     include!(concat!(env!("OUT_DIR"), "/groups.rs"));
 }
 
+/// The C examples, each run as a test.
+///
+/// They are complete programs; build.rs renames their `main` and generates a
+/// #[test] per file. An example that stops compiling or starts failing breaks
+/// `cargo test`, which CMake-only builds did not.
+#[cfg(test)]
+mod examples {
+    include!(concat!(env!("OUT_DIR"), "/examples.rs"));
+}
+
 /// The generated header is part of the public contract, so a few properties of
 /// it are asserted directly rather than left to review.
 #[cfg(test)]
