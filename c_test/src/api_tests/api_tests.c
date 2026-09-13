@@ -841,7 +841,7 @@ int test_sr_value_uuid(void) {
 }
 
 int test_sr_value_array(void) {
-    sr_value_t *val = sr_value_array();
+    sr_value_t *val = sr_value_array(NULL);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_VALUE_ARRAY);
     sr_value_free(val);
@@ -1263,7 +1263,7 @@ int test_sr_array_get(void) {
 }
 
 int test_sr_array_push(void) {
-    sr_value_t *arr_val = sr_value_array();
+    sr_value_t *arr_val = sr_value_array(NULL);
     ASSERT_NOT_NULL(arr_val);
     ASSERT_EQ(arr_val->tag, SR_VALUE_ARRAY);
     

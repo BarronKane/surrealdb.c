@@ -303,18 +303,28 @@ impl Value {
         Box::into_raw(Box::new(Value::SR_VALUE_REGEX(s)))
     }
 
-    /// Create an empty set value
+    /// Create a Set value from an array
     ///
     /// A set holds unique values; duplicates are discarded when it reaches the
-    /// database. Populate it with sr_array_push via sr_value_set_array.
+    /// database. Build the array with `sr_array_from_values` or
+    /// `sr_array_push`, then pass it here. A null pointer yields an empty set.
+    ///
+    /// The array is copied, so the caller keeps ownership of the one it passed
+    /// in and must still release it with `sr_array_free`.
     ///
     /// Free with sr_value_free
+    ///
+    /// # Safety
+    ///
+    /// - `arr` must be null, or point to a valid Array
     #[export_name = "sr_value_set"]
-    pub extern "C" fn value_set() -> *mut Value {
-        Box::into_raw(Box::new(Value::SR_VALUE_SET(Box::new(Array {
-            arr: std::ptr::null_mut(),
-            len: 0,
-        }))))
+    pub extern "C" fn value_set(arr: *const Array) -> *mut Value {
+        let inner = if arr.is_null() {
+            Array::empty()
+        } else {
+            unsafe { &*arr }.clone()
+        };
+        Box::into_raw(Box::new(Value::SR_VALUE_SET(Box::new(inner))))
     }
 
     /// An open bound, for a range that is unbounded at one end
@@ -364,12 +374,27 @@ impl Value {
         }))))
     }
 
+    /// Create an Array value from an array
+    ///
+    /// Build the array with `sr_array_from_values` or `sr_array_push`, then
+    /// pass it here. A null pointer yields an empty array.
+    ///
+    /// The array is copied, so the caller keeps ownership of the one it passed
+    /// in and must still release it with `sr_array_free`.
+    ///
+    /// Free with sr_value_free
+    ///
+    /// # Safety
+    ///
+    /// - `arr` must be null, or point to a valid Array
     #[export_name = "sr_value_array"]
-    pub extern "C" fn value_array() -> *mut Value {
-        Box::into_raw(Box::new(Value::SR_VALUE_ARRAY(Box::new(Array {
-            arr: std::ptr::null_mut(),
-            len: 0,
-        }))))
+    pub extern "C" fn value_array(arr: *const Array) -> *mut Value {
+        let inner = if arr.is_null() {
+            Array::empty()
+        } else {
+            unsafe { &*arr }.clone()
+        };
+        Box::into_raw(Box::new(Value::SR_VALUE_ARRAY(Box::new(inner))))
     }
 
     /// Create a Bytes value from raw data

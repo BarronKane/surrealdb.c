@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 2
-#define SR_VERSION_STRING "0.2.2"
+#define SR_VERSION_PATCH 3
+#define SR_VERSION_STRING "0.2.3"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -2142,14 +2142,22 @@ struct sr_value_t *sr_value_file(const char *bucket, const char *key);
 struct sr_value_t *sr_value_regex(const char *pattern);
 
 /**
- * Create an empty set value
+ * Create a Set value from an array
  *
  * A set holds unique values; duplicates are discarded when it reaches the
- * database. Populate it with sr_array_push via sr_value_set_array.
+ * database. Build the array with `sr_array_from_values` or
+ * `sr_array_push`, then pass it here. A null pointer yields an empty set.
+ *
+ * The array is copied, so the caller keeps ownership of the one it passed
+ * in and must still release it with `sr_array_free`.
  *
  * Free with sr_value_free
+ *
+ * # Safety
+ *
+ * - `arr` must be null, or point to a valid Array
  */
-struct sr_value_t *sr_value_set(void);
+struct sr_value_t *sr_value_set(const struct sr_array_t *arr);
 
 /**
  * An open bound, for a range that is unbounded at one end
@@ -2185,7 +2193,22 @@ struct sr_bound_t sr_bound_excluded(struct sr_value_t *val);
  */
 struct sr_value_t *sr_value_range(struct sr_bound_t start, struct sr_bound_t end);
 
-struct sr_value_t *sr_value_array(void);
+/**
+ * Create an Array value from an array
+ *
+ * Build the array with `sr_array_from_values` or `sr_array_push`, then
+ * pass it here. A null pointer yields an empty array.
+ *
+ * The array is copied, so the caller keeps ownership of the one it passed
+ * in and must still release it with `sr_array_free`.
+ *
+ * Free with sr_value_free
+ *
+ * # Safety
+ *
+ * - `arr` must be null, or point to a valid Array
+ */
+struct sr_value_t *sr_value_array(const struct sr_array_t *arr);
 
 /**
  * Create a Bytes value from raw data

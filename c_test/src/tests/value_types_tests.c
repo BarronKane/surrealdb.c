@@ -87,7 +87,7 @@ TEST(ValueTypes, RegexConstructor) {
 }
 
 TEST(ValueTypes, SetConstructor) {
-    sr_value_t *val = sr_value_set();
+    sr_value_t *val = sr_value_set(NULL);
     TEST_ASSERT_NOT_NULL(val);
     TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_SET, val->tag, "tag should be SET");
     sr_value_free(val);
@@ -163,6 +163,118 @@ TEST(ValueTypes, RegexSurvivesTheDatabase) {
                                   "a regex must not arrive as SR_VALUE_NONE");
 }
 
+/* Build [1, 2, 3] as an sr_array_t. The caller keeps ownership of both the
+   element values and the array itself. */
+static sr_array_t *ids_1_2_3(sr_value_t **elems) {
+    elems[0] = sr_value_int(1);
+    elems[1] = sr_value_int(2);
+    elems[2] = sr_value_int(3);
+    sr_value_t block[3] = { *elems[0], *elems[1], *elems[2] };
+    return sr_array_from_values(block, 3);
+}
+
+/* Ask the database a yes/no question about a bound variable. */
+static bool query_one_bool(const char *sql, bool *out) {
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res, sql, NULL);
+    if (n < 0) {
+        if (err) { sr_string_free(err); err = NULL; }
+        return false;
+    }
+    bool ok = false;
+    if (n > 0) {
+        const sr_value_t *v = sr_array_get(&res[0].ok, 0);
+        if (v && v->tag == SR_VALUE_BOOL) {
+            *out = v->sr_value_bool;
+            ok = true;
+        }
+        sr_arr_res_arr_free(res, n);
+    }
+    return ok;
+}
+
+/*
+ * A populated array must be constructible as a value.
+ *
+ * `sr_value_array` and `sr_value_set` used to take no argument and always
+ * produced an empty container, so there was no supported way to bind
+ * `WHERE id IN $ids` from C -- the data model allowed it, only the constructor
+ * was missing. Callers had to hand-assemble the tagged union.
+ */
+TEST(ValueTypes, ArrayValueCarriesItsElements) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_value_t *elems[3];
+    sr_array_t *arr = ids_1_2_3(elems);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, sr_array_len(arr), "the array should hold three values");
+
+    sr_value_t *val = sr_value_array(arr);
+    TEST_ASSERT_NOT_NULL(val);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_ARRAY, val->tag, "tag should be ARRAY");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, sr_array_len(val->sr_value_array),
+                                  "the value must carry the elements, not an empty array");
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_set(db, &err, "ids", val));
+
+    bool hit = false, miss = true;
+    if (query_one_bool("RETURN 2 IN $ids;", &hit) &&
+        query_one_bool("RETURN 9 IN $ids;", &miss)) {
+        TEST_ASSERT_TRUE_MESSAGE(hit, "2 should be in [1,2,3]");
+        TEST_ASSERT_FALSE_MESSAGE(miss, "9 should not be in [1,2,3]");
+    } else {
+        TEST_FAIL_MESSAGE("the bound array should be queryable");
+    }
+
+    /* The array is copied, so freeing ours must not disturb the value. */
+    sr_array_free(arr);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, sr_array_len(val->sr_value_array),
+                                  "the value owns its own copy");
+
+    sr_value_free(val);
+    for (int i = 0; i < 3; ++i) sr_value_free(elems[i]);
+}
+
+TEST(ValueTypes, SetValueCarriesItsElements) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_value_t *elems[3];
+    sr_array_t *arr = ids_1_2_3(elems);
+
+    sr_value_t *val = sr_value_set(arr);
+    TEST_ASSERT_NOT_NULL(val);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_SET, val->tag, "tag should be SET");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, sr_array_len(val->sr_value_set),
+                                  "the value must carry the elements");
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_set(db, &err, "sids", val));
+
+    bool hit = false;
+    if (query_one_bool("RETURN 3 IN $sids;", &hit)) {
+        TEST_ASSERT_TRUE_MESSAGE(hit, "3 should be in the set");
+    } else {
+        TEST_FAIL_MESSAGE("the bound set should be queryable");
+    }
+
+    sr_array_free(arr);
+    sr_value_free(val);
+    for (int i = 0; i < 3; ++i) sr_value_free(elems[i]);
+}
+
+/* A null pointer is the documented way to get an empty container. */
+TEST(ValueTypes, NullArrayYieldsAnEmptyContainer) {
+    sr_value_t *a = sr_value_array(NULL);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_ARRAY, a->tag);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sr_array_len(a->sr_value_array), "should be empty");
+    sr_value_free(a);
+
+    sr_value_t *s = sr_value_set(NULL);
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_SET, s->tag);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sr_array_len(s->sr_value_set), "should be empty");
+    sr_value_free(s);
+}
+
 TEST_GROUP_RUNNER(ValueTypes) {
     RUN_TEST_CASE(ValueTypes, TableConstructor);
     RUN_TEST_CASE(ValueTypes, FileConstructor);
@@ -173,5 +285,8 @@ TEST_GROUP_RUNNER(ValueTypes) {
     RUN_TEST_CASE(ValueTypes, NullConstructorArgsAreRejected);
     RUN_TEST_CASE(ValueTypes, RangeSurvivesTheDatabase);
     RUN_TEST_CASE(ValueTypes, SetSurvivesTheDatabase);
+    RUN_TEST_CASE(ValueTypes, ArrayValueCarriesItsElements);
+    RUN_TEST_CASE(ValueTypes, SetValueCarriesItsElements);
+    RUN_TEST_CASE(ValueTypes, NullArrayYieldsAnEmptyContainer);
     RUN_TEST_CASE(ValueTypes, RegexSurvivesTheDatabase);
 }
