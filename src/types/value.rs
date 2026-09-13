@@ -397,6 +397,125 @@ impl Value {
         Box::into_raw(Box::new(Value::SR_VALUE_ARRAY(Box::new(inner))))
     }
 
+    /// Create a Polygon geometry value from a list of rings
+    ///
+    /// `rings[0]` is the exterior ring; every ring after it is a hole. This is
+    /// the shape of GeoJSON's `coordinates` array, so a caller that already has
+    /// GeoJSON can pass it through unchanged.
+    ///
+    /// `lens` gives the coordinate count of each ring. The coordinates are
+    /// copied, so the caller keeps ownership of the blocks it passed in.
+    ///
+    /// `sr_value_polygon` is the single-ring shorthand and cannot express a
+    /// hole; use this whenever the polygon has one. A null pointer or a
+    /// non-positive `ring_count` yields an empty polygon.
+    ///
+    /// Free with sr_value_free
+    ///
+    /// # Safety
+    ///
+    /// - `rings` must be null, or point to at least `ring_count` pointers
+    /// - `lens` must be null, or point to at least `ring_count` lengths
+    /// - each non-null `rings[i]` must point to at least `lens[i]` coordinates
+    #[export_name = "sr_value_polygon_rings"]
+    pub extern "C" fn value_polygon_rings(
+        rings: *const *const crate::geometry::sr_g_coord,
+        lens: *const std::ffi::c_int,
+        ring_count: std::ffi::c_int,
+    ) -> *mut Value {
+        use crate::geometry::sr_geometry;
+
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(
+            sr_geometry::SR_GEOMETRY_POLYGON(Self::build_polygon(rings, lens, ring_count)),
+        )))
+    }
+
+    /// Shared by `sr_value_polygon_rings` and `sr_value_multipolygon_from`.
+    fn build_polygon(
+        rings: *const *const crate::geometry::sr_g_coord,
+        lens: *const std::ffi::c_int,
+        ring_count: std::ffi::c_int,
+    ) -> crate::geometry::sr_g_polygon {
+        use crate::array::MakeArray;
+        use crate::geometry::{sr_g_linestring, sr_g_polygon};
+
+        let empty = || sr_g_linestring(Vec::new().make_array());
+
+        if rings.is_null() || lens.is_null() || ring_count <= 0 {
+            return sr_g_polygon(empty(), Vec::<sr_g_linestring>::new().make_array());
+        }
+
+        let ring_ptrs = unsafe { std::slice::from_raw_parts(rings, ring_count as usize) };
+        let lengths = unsafe { std::slice::from_raw_parts(lens, ring_count as usize) };
+
+        let ring_at = |i: usize| -> sr_g_linestring {
+            let (ptr, len) = (ring_ptrs[i], lengths[i]);
+            if ptr.is_null() || len <= 0 {
+                empty()
+            } else {
+                let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                sr_g_linestring(slice.to_vec().make_array())
+            }
+        };
+
+        let exterior = ring_at(0);
+        let interiors: Vec<sr_g_linestring> = (1..ring_ptrs.len()).map(ring_at).collect();
+        sr_g_polygon(exterior, interiors.make_array())
+    }
+
+    /// Create a MultiPolygon geometry value from polygon values
+    ///
+    /// `polys` is an array of `len` pointers to values made by
+    /// `sr_value_polygon` or `sr_value_polygon_rings`. Each is copied, so the
+    /// caller keeps ownership and must still release them with
+    /// `sr_value_free`.
+    ///
+    /// `sr_value_multipolygon` takes flat exterior rings and cannot express a
+    /// hole in any of its members; use this when any of them has one. A null
+    /// pointer or a non-positive length yields an empty multipolygon.
+    ///
+    /// Every member must be a Polygon value. If any is null or of another kind
+    /// the result is SR_VALUE_NONE rather than a malformed multipolygon.
+    ///
+    /// Free with sr_value_free
+    ///
+    /// # Safety
+    ///
+    /// - `polys` must be null, or point to at least `len` valid Value pointers
+    #[export_name = "sr_value_multipolygon_from"]
+    pub extern "C" fn value_multipolygon_from(
+        polys: *const *const Value,
+        len: std::ffi::c_int,
+    ) -> *mut Value {
+        use crate::array::MakeArray;
+        use crate::geometry::{sr_g_multipolygon, sr_g_polygon, sr_geometry};
+
+        let wrap = |members: Vec<sr_g_polygon>| {
+            Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(
+                sr_geometry::SR_GEOMETRY_MULTIPOLYGON(sr_g_multipolygon(members.make_array())),
+            )))
+        };
+
+        if polys.is_null() || len <= 0 {
+            return wrap(Vec::new());
+        }
+
+        let ptrs = unsafe { std::slice::from_raw_parts(polys, len as usize) };
+        let mut members: Vec<sr_g_polygon> = Vec::with_capacity(ptrs.len());
+        for &p in ptrs {
+            if p.is_null() {
+                return Box::into_raw(Box::new(Value::SR_VALUE_NONE));
+            }
+            match unsafe { &*p } {
+                Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_POLYGON(poly)) => {
+                    members.push(poly.clone())
+                }
+                _ => return Box::into_raw(Box::new(Value::SR_VALUE_NONE)),
+            }
+        }
+        wrap(members)
+    }
+
     /// Create a GeometryCollection value from geometry values
     ///
     /// `geoms` is an array of `len` pointers to values made by the other

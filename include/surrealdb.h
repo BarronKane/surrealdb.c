@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 4
-#define SR_VERSION_STRING "0.2.4"
+#define SR_VERSION_PATCH 5
+#define SR_VERSION_STRING "0.2.5"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -303,6 +303,15 @@ typedef struct sr_g_linestring_arr_t {
   int len;
 } sr_g_linestring_arr_t;
 
+/**
+ * A polygon: an exterior ring, then zero or more interior rings (holes).
+ *
+ * The interiors are owned by the value and released with Rust's allocator.
+ * Do not assign to that field from C: a block from `malloc` is freed with the
+ * wrong allocator and corrupts the heap. Build polygons with
+ * `sr_value_polygon_rings`, which copies -- `sr_value_polygon` takes a single
+ * ring and cannot express a hole.
+ */
 typedef struct sr_g_polygon {
   struct sr_g_linestring _0;
   struct sr_g_linestring_arr_t _1;
@@ -2217,6 +2226,55 @@ struct sr_value_t *sr_value_range(struct sr_bound_t start, struct sr_bound_t end
  * - `arr` must be null, or point to a valid Array
  */
 struct sr_value_t *sr_value_array(const struct sr_array_t *arr);
+
+/**
+ * Create a Polygon geometry value from a list of rings
+ *
+ * `rings[0]` is the exterior ring; every ring after it is a hole. This is
+ * the shape of GeoJSON's `coordinates` array, so a caller that already has
+ * GeoJSON can pass it through unchanged.
+ *
+ * `lens` gives the coordinate count of each ring. The coordinates are
+ * copied, so the caller keeps ownership of the blocks it passed in.
+ *
+ * `sr_value_polygon` is the single-ring shorthand and cannot express a
+ * hole; use this whenever the polygon has one. A null pointer or a
+ * non-positive `ring_count` yields an empty polygon.
+ *
+ * Free with sr_value_free
+ *
+ * # Safety
+ *
+ * - `rings` must be null, or point to at least `ring_count` pointers
+ * - `lens` must be null, or point to at least `ring_count` lengths
+ * - each non-null `rings[i]` must point to at least `lens[i]` coordinates
+ */
+struct sr_value_t *sr_value_polygon_rings(const struct sr_g_coord *const *rings,
+                                          const int *lens,
+                                          int ring_count);
+
+/**
+ * Create a MultiPolygon geometry value from polygon values
+ *
+ * `polys` is an array of `len` pointers to values made by
+ * `sr_value_polygon` or `sr_value_polygon_rings`. Each is copied, so the
+ * caller keeps ownership and must still release them with
+ * `sr_value_free`.
+ *
+ * `sr_value_multipolygon` takes flat exterior rings and cannot express a
+ * hole in any of its members; use this when any of them has one. A null
+ * pointer or a non-positive length yields an empty multipolygon.
+ *
+ * Every member must be a Polygon value. If any is null or of another kind
+ * the result is SR_VALUE_NONE rather than a malformed multipolygon.
+ *
+ * Free with sr_value_free
+ *
+ * # Safety
+ *
+ * - `polys` must be null, or point to at least `len` valid Value pointers
+ */
+struct sr_value_t *sr_value_multipolygon_from(const struct sr_value_t *const *polys, int len);
 
 /**
  * Create a GeometryCollection value from geometry values

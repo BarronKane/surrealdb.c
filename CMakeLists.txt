@@ -4,10 +4,22 @@ cmake_minimum_required(VERSION 3.21) # First version to support C23
 # ignores a deployment target set afterwards.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/AppleDeploymentTarget.cmake)
 
+# Cargo.toml is the single source of truth for the version; build.rs stamps the
+# same value into the header. Parsing it here keeps a hand-written copy from
+# going stale -- only [package] has a version at the start of a line, as
+# dependency versions are all inside braces.
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/Cargo.toml" SURREALDB_C_VERSION_LINE
+    REGEX "^version *= *\"[0-9]+\\.[0-9]+\\.[0-9]+\"" LIMIT_COUNT 1)
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" SURREALDB_C_VERSION
+    "${SURREALDB_C_VERSION_LINE}")
+if(NOT SURREALDB_C_VERSION)
+    message(FATAL_ERROR "Could not read the package version from Cargo.toml")
+endif()
+
 # CXX is enabled despite there being no C++ sources: some IDEs (Visual Studio in
 # particular) generate a more useful project when the language is present, and
 # consumers of this library are frequently C++.
-project(surrealdb_c VERSION 0.2.2 LANGUAGES C CXX)
+project(surrealdb_c VERSION ${SURREALDB_C_VERSION} LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Project Configuration

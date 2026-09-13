@@ -256,6 +256,138 @@ TEST(Geometry, CollectionRejectsNonGeometryMembers) {
     sr_value_free(num);
 }
 
+/* An exterior ring and a hole inside it. */
+static sr_g_coord HOLE[5] = {{2,2},{4,2},{4,4},{2,4},{2,2}};
+
+/*
+ * A polygon with a hole must be constructible in C.
+ *
+ * sr_value_polygon takes one flat ring and hardcodes an empty interior list,
+ * so nothing built in C could have a hole -- and the failure was silent: the
+ * constructor returned a perfectly valid hole-less polygon with no signal that
+ * anything was missing. Reading a holed polygon back always worked, so data
+ * round-tripped through C was quietly flattened.
+ */
+TEST(Geometry, PolygonWithHole) {
+    const sr_g_coord *rings[2] = { RING, HOLE };
+    int lens[2] = { 5, 5 };
+
+    sr_value_t *v = sr_value_polygon_rings(rings, lens, 2);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_OBJECT, v->tag);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_POLYGON, v->sr_geometry_object.tag);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, v->sr_geometry_object.sr_geometry_polygon._0._0.len,
+                                  "the exterior ring should carry five coords");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, v->sr_geometry_object.sr_geometry_polygon._1.len,
+                                  "the hole must be present");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        5, v->sr_geometry_object.sr_geometry_polygon._1.ptr[0]._0.len,
+        "the hole should carry five coords");
+    sr_value_free(v);
+
+    /* One ring is just a polygon with no holes -- same as sr_value_polygon. */
+    sr_value_t *solid = sr_value_polygon_rings(rings, lens, 1);
+    TEST_ASSERT_EQUAL_INT(0, solid->sr_geometry_object.sr_geometry_polygon._1.len);
+    sr_value_free(solid);
+
+    /* Null degrades to an empty polygon rather than crashing. */
+    sr_value_t *empty = sr_value_polygon_rings(NULL, NULL, 0);
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_POLYGON, empty->sr_geometry_object.tag);
+    TEST_ASSERT_EQUAL_INT(0, empty->sr_geometry_object.sr_geometry_polygon._1.len);
+    sr_value_free(empty);
+}
+
+TEST(Geometry, PolygonHoleSurvivesTheDatabase) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    const sr_g_coord *rings[2] = { RING, HOLE };
+    int lens[2] = { 5, 5 };
+    sr_value_t *v = sr_value_polygon_rings(rings, lens, 2);
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_set(db, &err, "p", v));
+
+    sr_arr_res_t *res = NULL;
+    int rc = sr_query(db, &err, &res, "RETURN $p;", NULL);
+    if (rc < 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "a holed polygon should bind: %s",
+                 err ? (const char *)err : "(no error)");
+        if (err) { sr_string_free(err); err = NULL; }
+        sr_value_free(v);
+        TEST_FAIL_MESSAGE(msg);
+    }
+    TEST_ASSERT_GREATER_THAN_INT(0, rc);
+
+    const sr_value_t *back = sr_array_get(&res[0].ok, 0);
+    TEST_ASSERT_NOT_NULL(back);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_GEOMETRY_OBJECT, back->tag,
+                                  "a polygon must not arrive as SR_VALUE_NONE");
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_POLYGON, back->sr_geometry_object.tag);
+    /* The whole point: the hole is still there after the round trip. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, back->sr_geometry_object.sr_geometry_polygon._1.len,
+                                  "the hole must survive the database");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        5, back->sr_geometry_object.sr_geometry_polygon._1.ptr[0]._0.len,
+        "the hole should still carry five coords");
+
+    sr_arr_res_arr_free(res, rc);
+    sr_value_free(v);
+}
+
+TEST(Geometry, MultiPolygonFromPolygonValues) {
+    const sr_g_coord *rings[2] = { RING, HOLE };
+    int lens[2] = { 5, 5 };
+
+    sr_value_t *holed = sr_value_polygon_rings(rings, lens, 2);
+    sr_value_t *solid = sr_value_polygon(RING, 5);
+    const sr_value_t *members[2] = { holed, solid };
+
+    sr_value_t *mp = sr_value_multipolygon_from(members, 2);
+    TEST_ASSERT_NOT_NULL(mp);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_MULTIPOLYGON, mp->sr_geometry_object.tag);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, mp->sr_geometry_object.sr_geometry_multipolygon._0.len,
+                                  "both polygons should be carried");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, mp->sr_geometry_object.sr_geometry_multipolygon._0.ptr[0]._1.len,
+        "the first member must keep its hole");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, mp->sr_geometry_object.sr_geometry_multipolygon._0.ptr[1]._1.len,
+        "the second member has none");
+
+    /* Members are copied, so releasing ours must not disturb the value. */
+    sr_value_free(holed);
+    sr_value_free(solid);
+    TEST_ASSERT_EQUAL_INT(2, mp->sr_geometry_object.sr_geometry_multipolygon._0.len);
+    TEST_ASSERT_EQUAL_INT(1, mp->sr_geometry_object.sr_geometry_multipolygon._0.ptr[0]._1.len);
+    sr_value_free(mp);
+}
+
+TEST(Geometry, MultiPolygonFromRejectsNonPolygons) {
+    sr_value_t *empty = sr_value_multipolygon_from(NULL, 0);
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_MULTIPOLYGON, empty->sr_geometry_object.tag);
+    TEST_ASSERT_EQUAL_INT(0, empty->sr_geometry_object.sr_geometry_multipolygon._0.len);
+    sr_value_free(empty);
+
+    /* A point is a geometry but not a polygon -- still rejected. */
+    sr_value_t *poly = sr_value_polygon(RING, 5);
+    sr_value_t *pt = sr_value_point(1.0, 2.0);
+    const sr_value_t *mixed[2] = { poly, pt };
+    sr_value_t *bad = sr_value_multipolygon_from(mixed, 2);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_NONE, bad->tag,
+                                  "a non-polygon member must be rejected");
+    sr_value_free(bad);
+
+    const sr_value_t *holed[2] = { poly, NULL };
+    sr_value_t *holed_v = sr_value_multipolygon_from(holed, 2);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_NONE, holed_v->tag);
+    sr_value_free(holed_v);
+
+    sr_value_free(poly);
+    sr_value_free(pt);
+}
+
 TEST_GROUP_RUNNER(Geometry) {
     RUN_TEST_CASE(Geometry, Point);
     RUN_TEST_CASE(Geometry, LineString);
@@ -267,4 +399,8 @@ TEST_GROUP_RUNNER(Geometry) {
     RUN_TEST_CASE(Geometry, Collection);
     RUN_TEST_CASE(Geometry, CollectionSurvivesTheDatabase);
     RUN_TEST_CASE(Geometry, CollectionRejectsNonGeometryMembers);
+    RUN_TEST_CASE(Geometry, PolygonWithHole);
+    RUN_TEST_CASE(Geometry, PolygonHoleSurvivesTheDatabase);
+    RUN_TEST_CASE(Geometry, MultiPolygonFromPolygonValues);
+    RUN_TEST_CASE(Geometry, MultiPolygonFromRejectsNonPolygons);
 }

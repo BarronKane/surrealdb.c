@@ -104,6 +104,13 @@ impl Drop for sr_g_linestring {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
+/// A polygon: an exterior ring, then zero or more interior rings (holes).
+///
+/// The interiors are owned by the value and released with Rust's allocator.
+/// Do not assign to that field from C: a block from `malloc` is freed with the
+/// wrong allocator and corrupts the heap. Build polygons with
+/// `sr_value_polygon_rings`, which copies -- `sr_value_polygon` takes a single
+/// ring and cannot express a hole.
 pub struct sr_g_polygon(pub sr_g_linestring, pub ArrayGen<sr_g_linestring>);
 
 impl From<Polygon<f64>> for sr_g_polygon {
