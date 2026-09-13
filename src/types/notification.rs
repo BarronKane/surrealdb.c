@@ -9,6 +9,20 @@ pub struct Notification {
     pub data: Value,
 }
 
+impl Notification {
+    /// Release a notification filled in by [`sr_stream_next`].
+    ///
+    /// The notification's `data` is an owned Value living in the caller's own
+    /// storage, not a boxed one, so `sr_value_free` must not be used on it:
+    /// that function reclaims a Box and would be handed a pointer it did not
+    /// allocate. Without this entry point a caller had no way to release the
+    /// value at all, and every notification leaked its contents.
+    #[export_name = "sr_notification_free"]
+    pub extern "C" fn notification_free(notification: Notification) {
+        drop(notification)
+    }
+}
+
 /// Convert from the protocol-level Notification (surrealdb_types::Notification)
 /// Used by the RPC notification stream path.
 impl From<sdbNotification> for Notification {

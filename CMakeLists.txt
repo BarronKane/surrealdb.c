@@ -7,7 +7,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/AppleDeploymentTarget.cmake)
 # CXX is enabled despite there being no C++ sources: some IDEs (Visual Studio in
 # particular) generate a more useful project when the language is present, and
 # consumers of this library are frequently C++.
-project(surrealdb_c VERSION 0.2.0 LANGUAGES C CXX)
+project(surrealdb_c VERSION 0.2.1 LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Project Configuration
@@ -54,6 +54,10 @@ set(SURREALDB_CARGO_TARGET "" CACHE STRING "Cargo target triple to build the Rus
 # dependency list until something else forces a reconfigure, so the library can
 # go stale. The cost is a directory scan per build.
 option(SURREALDB_C_RUST_GLOB_DEPENDS "Use CONFIGURE_DEPENDS for Rust source globs" ON)
+
+# Sanitizers for the test targets. Off by default; see cmake/Sanitizers.cmake
+# for why the suite needs them to be able to detect an ownership bug at all.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/Sanitizers.cmake)
 
 # Platform agnostic installation trees.
 include(GNUInstallDirs)

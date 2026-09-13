@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 0
-#define SR_VERSION_STRING "0.2.0"
+#define SR_VERSION_PATCH 1
+#define SR_VERSION_STRING "0.2.1"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -661,6 +661,9 @@ int sr_commit(const struct sr_surreal_t *db, sr_string_t *err_ptr);
  * The resource can be a table name (e.g., "user") for auto-generated IDs,
  * or a specific record ID (e.g., "user:john").
  *
+ * On success the created record is written to `res_ptr` and the caller owns
+ * it: release it with [`sr_object_free`]. Pass null to discard the result.
+ *
  * # Safety
  *
  * - `db` must be a valid pointer to a Surreal connection
@@ -671,7 +674,7 @@ int sr_commit(const struct sr_surreal_t *db, sr_string_t *err_ptr);
  */
 int sr_create(const struct sr_surreal_t *db,
               sr_string_t *err_ptr,
-              struct sr_object_t **res_ptr,
+              struct sr_object_t *res_ptr,
               const char *resource,
               const struct sr_object_t *content);
 
@@ -1600,9 +1603,18 @@ struct sr_array_t *sr_array_push(const struct sr_array_t *arr, const struct sr_v
  */
 void sr_array_free(struct sr_array_t *arr);
 
-void sr_bytes_free(struct sr_bytes_t bytes);
-
 void sr_byte_arr_free(uint8_t *ptr, int len);
+
+/**
+ * Release a notification filled in by [`sr_stream_next`].
+ *
+ * The notification's `data` is an owned Value living in the caller's own
+ * storage, not a boxed one, so `sr_value_free` must not be used on it:
+ * that function reclaims a Box and would be handed a pointer it did not
+ * allocate. Without this entry point a caller had no way to release the
+ * value at all, and every notification leaked its contents.
+ */
+void sr_notification_free(struct sr_notification_t notification);
 
 void sr_print_notification(const struct sr_notification_t *notification);
 
@@ -1696,8 +1708,6 @@ int sr_object_keys(const struct sr_object_t *obj, char ***keys_ptr);
  * Free a string array returned by sr_object_keys
  */
 void sr_string_arr_free(char **arr, int len);
-
-void sr_arr_res_free(struct sr_arr_res_t res);
 
 void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
 

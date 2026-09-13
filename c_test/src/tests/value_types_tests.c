@@ -11,6 +11,7 @@
 #include "unity_fixture.h"
 #include "surrealdb.h"
 #include <string.h>
+#include <stdbool.h>
 
 TEST_GROUP(ValueTypes);
 
@@ -33,20 +34,31 @@ TEST_TEAR_DOWN(ValueTypes) {
     }
 }
 
-/* Run a statement and return the single resulting value, or NULL. */
-static sr_value_t *query_one(const char *statement) {
-    sr_value_t *out = NULL;
+/* Run a statement and report the tag of its single resulting value.
+ *
+ * Returns false when the statement produced nothing.
+ *
+ * The tag is copied out rather than returning the sr_value_t itself: the value
+ * lives inside the array sr_query allocated, so a pointer to it cannot outlive
+ * that array, and the array is one allocation that must be released whole. An
+ * earlier version of this helper returned the interior pointer and leaked the
+ * array -- the caller had no way to free either one. */
+static bool query_one_tag(const char *statement, sr_value_t_Tag *tag_out) {
     sr_arr_res_t *results = NULL;
 
     int len = sr_query(db, &err, &results, statement, NULL);
     if (len < 0) {
         if (err) { sr_string_free(err); err = NULL; }
-        return NULL;
+        return false;
     }
+
+    bool got = false;
     if (len > 0 && results[0].ok.len > 0) {
-        out = &results[0].ok.arr[0];
+        *tag_out = results[0].ok.arr[0].tag;
+        got = true;
     }
-    return out ? out : NULL;
+    sr_arr_res_arr_free(results, len);
+    return got;
 }
 
 /* ------------------------------------------------------------ constructors */
@@ -121,33 +133,33 @@ TEST(ValueTypes, NullConstructorArgsAreRejected) {
 TEST(ValueTypes, RangeSurvivesTheDatabase) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
-    sr_value_t *val = query_one("RETURN 1..10");
-    if (val == NULL) {
+    sr_value_t_Tag tag;
+    if (!query_one_tag("RETURN 1..10", &tag)) {
         TEST_IGNORE_MESSAGE("server did not return a value for a range literal");
     }
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_RANGE, val->tag,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_RANGE, tag,
                                   "a range must not arrive as SR_VALUE_NONE");
 }
 
 TEST(ValueTypes, SetSurvivesTheDatabase) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
-    sr_value_t *val = query_one("RETURN <set>[1, 2, 2, 3]");
-    if (val == NULL) {
+    sr_value_t_Tag tag;
+    if (!query_one_tag("RETURN <set>[1, 2, 2, 3]", &tag)) {
         TEST_IGNORE_MESSAGE("server did not return a value for a set literal");
     }
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_SET, val->tag,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_SET, tag,
                                   "a set must not arrive as SR_VALUE_NONE");
 }
 
 TEST(ValueTypes, RegexSurvivesTheDatabase) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
-    sr_value_t *val = query_one("RETURN /^abc$/");
-    if (val == NULL) {
+    sr_value_t_Tag tag;
+    if (!query_one_tag("RETURN /^abc$/", &tag)) {
         TEST_IGNORE_MESSAGE("server did not return a value for a regex literal");
     }
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_REGEX, val->tag,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_REGEX, tag,
                                   "a regex must not arrive as SR_VALUE_NONE");
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "surrealdb_c"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
 description = "The official SurrealDB SDK for C"

@@ -69,6 +69,10 @@ TEST(Stream, Next) {
     if (got > 0) {
         TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ACTION_CREATE, notification.action,
                                       "a CREATE should be reported as such");
+        /* The notification owns its data. sr_value_free must not be used on
+           notification.data: that reclaims a Box, and this value lives in our
+           own storage. */
+        sr_notification_free(notification);
     }
 
     sr_stream_kill(stream);

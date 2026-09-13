@@ -31,7 +31,7 @@ TEST(CRUD, Create) {
     sr_object_insert_str(&obj, "name", "test_item");
     sr_object_insert_int(&obj, "value", 42);
     
-    sr_object_t *result;
+    sr_object_t result;
     int len = sr_create(db, &err, &result, "test_table:1", &obj);
     if (len < 0) {
         char msg[256];
@@ -40,8 +40,12 @@ TEST(CRUD, Create) {
         sr_object_free(obj);
         TEST_FAIL_MESSAGE(msg);
     }
-    TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(0, len, "create should succeed");
-    
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, len, "create with a result slot reports one record");
+
+    /* res_ptr was non-null, so the record is written by value and owned here.
+       Freeing it must release everything: sr_create previously boxed the
+       object and leaked the box, which no C function could reclaim. */
+    sr_object_free(result);
     sr_object_free(obj);
 }
 
@@ -50,8 +54,8 @@ TEST(CRUD, Delete) {
     
     sr_object_t obj = sr_object_new();
     sr_object_insert_str(&obj, "name", "to_delete");
-    sr_object_t *create_result;
-    sr_create(db, &err, &create_result, "test_table:2", &obj);
+    /* The result is not inspected here; null discards it. */
+    sr_create(db, &err, NULL, "test_table:2", &obj);
     sr_object_free(obj);
     
     sr_value_t *delete_result;
@@ -99,8 +103,8 @@ TEST(CRUD, Select) {
     
     sr_object_t obj = sr_object_new();
     sr_object_insert_str(&obj, "name", "select_test");
-    sr_object_t *create_result;
-    sr_create(db, &err, &create_result, "test_table:3", &obj);
+    /* The result is not inspected here; null discards it. */
+    sr_create(db, &err, NULL, "test_table:3", &obj);
     sr_object_free(obj);
     
     sr_value_t *select_result;
@@ -123,8 +127,8 @@ TEST(CRUD, Update) {
     
     sr_object_t obj = sr_object_new();
     sr_object_insert_str(&obj, "name", "original");
-    sr_object_t *create_result;
-    sr_create(db, &err, &create_result, "test_table:4", &obj);
+    /* The result is not inspected here; null discards it. */
+    sr_create(db, &err, NULL, "test_table:4", &obj);
     sr_object_free(obj);
     
     sr_object_t update_obj = sr_object_new();
@@ -176,8 +180,8 @@ TEST(CRUD, Merge) {
     sr_object_t obj = sr_object_new();
     sr_object_insert_str(&obj, "name", "original");
     sr_object_insert_int(&obj, "count", 1);
-    sr_object_t *create_result;
-    sr_create(db, &err, &create_result, "test_table:6", &obj);
+    /* The result is not inspected here; null discards it. */
+    sr_create(db, &err, NULL, "test_table:6", &obj);
     sr_object_free(obj);
     
     sr_object_t merge_obj = sr_object_new();
@@ -206,14 +210,12 @@ TEST(CRUD, InsertRelation) {
     /* A relation needs both endpoints to exist first. */
     sr_object_t a = sr_object_new();
     sr_object_insert_str(&a, "name", "alice");
-    sr_object_t *created_a = NULL;
-    sr_create(db, &err, &created_a, "person:alice", &a);
+    sr_create(db, &err, NULL, "person:alice", &a);
     sr_object_free(a);
 
     sr_object_t b = sr_object_new();
     sr_object_insert_str(&b, "name", "bob");
-    sr_object_t *created_b = NULL;
-    sr_create(db, &err, &created_b, "person:bob", &b);
+    sr_create(db, &err, NULL, "person:bob", &b);
     sr_object_free(b);
 
     /* in and out must be record IDs, not strings. */

@@ -30,8 +30,8 @@ TEST(IO, Export) {
     // Create some data to export
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "test_export");
-    sr_object_t *result;
-    int res = sr_create(db, &err, &result, "export_test", &content);
+    /* Only the record needs to exist; null discards the result. */
+    int res = sr_create(db, &err, NULL, "export_test", &content);
     sr_object_free(content);
     
     if (res < 0) {

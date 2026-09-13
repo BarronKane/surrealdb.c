@@ -173,6 +173,7 @@ int test_sr_authenticate(void) {
     res = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
     if (res < 0) {
         /* In-memory DB may not require auth, which is fine */
+        if (err) sr_string_free(err);
         sr_surreal_disconnect(db);
         return API_TEST_SKIP;
     }
@@ -204,6 +205,7 @@ int test_sr_signin(void) {
     res = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
     if (res < 0) {
         /* In-memory DB may not support root auth - skip test */
+        if (err) sr_string_free(err);
         sr_surreal_disconnect(db);
         return API_TEST_SKIP;
     }
@@ -242,9 +244,11 @@ int test_sr_signup(void) {
     
     if (res < 0) {
         /* If we can't create access method, skip */
+        if (err) sr_string_free(err);
         sr_surreal_disconnect(db);
         return API_TEST_SKIP;
     }
+    sr_arr_res_arr_free(query_res, res);
     
     /* Test RECORD signup */
     sr_credentials_scope scope = RECORD;
@@ -291,7 +295,7 @@ int test_sr_create(void) {
     if (setup_db(&db) != API_TEST_PASS) return API_TEST_FAIL;
     
     sr_string_t err;
-    sr_object_t *result;
+    sr_object_t result;
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "test_item");
     
@@ -299,7 +303,8 @@ int test_sr_create(void) {
     ASSERT_GE(res, 0);
     
     sr_object_free(content);
-    /* Note: result is returned via pointer from Rust - do not free with sr_object_free */
+    /* The created record is written by value and owned by the caller. */
+    sr_object_free(result);
     sr_surreal_disconnect(db);
     return API_TEST_PASS;
 }
@@ -363,10 +368,8 @@ int test_sr_update(void) {
     /* First create a record */
     sr_object_t create_content = sr_object_new();
     sr_object_insert_str(&create_content, "name", "original");
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:1", &create_content);
+    sr_create(db, &err, NULL, "items:1", &create_content);
     sr_object_free(create_content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Update it */
     sr_object_t update_content = sr_object_new();
@@ -415,10 +418,8 @@ int test_sr_delete(void) {
     /* First create a record */
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "to_delete");
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:delete1", &content);
+    sr_create(db, &err, NULL, "items:delete1", &content);
     sr_object_free(content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Delete it */
     int len = sr_delete(db, &err, &results, "items:delete1");
@@ -443,10 +444,8 @@ int test_sr_merge(void) {
     sr_object_t create_content = sr_object_new();
     sr_object_insert_str(&create_content, "name", "original");
     sr_object_insert_int(&create_content, "count", 1);
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:merge1", &create_content);
+    sr_create(db, &err, NULL, "items:merge1", &create_content);
     sr_object_free(create_content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Merge new data */
     sr_object_t merge_content = sr_object_new();
@@ -501,17 +500,13 @@ int test_sr_relate(void) {
     /* First create two records */
     sr_object_t p1 = sr_object_new();
     sr_object_insert_str(&p1, "name", "John");
-    sr_object_t *p1_res;
-    sr_create(db, &err, &p1_res, "person:john", &p1);
+    sr_create(db, &err, NULL, "person:john", &p1);
     sr_object_free(p1);
-    /* Note: p1_res is returned via pointer from Rust - do not free with sr_object_free */
     
     sr_object_t p2 = sr_object_new();
     sr_object_insert_str(&p2, "name", "Jane");
-    sr_object_t *p2_res;
-    sr_create(db, &err, &p2_res, "person:jane", &p2);
+    sr_create(db, &err, NULL, "person:jane", &p2);
     sr_object_free(p2);
-    /* Note: p2_res is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Create relation */
     int len = sr_relate(db, &err, &results, "person:john", "knows", "person:jane", NULL);
@@ -539,10 +534,8 @@ int test_sr_patch_add(void) {
     /* First create a record */
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "test");
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:patch1", &content);
+    sr_create(db, &err, NULL, "items:patch1", &content);
     sr_object_free(content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Patch add */
     sr_value_t *value = sr_value_string("new_value");
@@ -569,10 +562,8 @@ int test_sr_patch_remove(void) {
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "test");
     sr_object_insert_str(&content, "to_remove", "value");
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:patch2", &content);
+    sr_create(db, &err, NULL, "items:patch2", &content);
     sr_object_free(content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Patch remove */
     int len = sr_patch_remove(db, &err, &results, "items:patch2", "/to_remove");
@@ -596,10 +587,8 @@ int test_sr_patch_replace(void) {
     /* First create a record */
     sr_object_t content = sr_object_new();
     sr_object_insert_str(&content, "name", "original");
-    sr_object_t *created;
-    sr_create(db, &err, &created, "items:patch3", &content);
+    sr_create(db, &err, NULL, "items:patch3", &content);
     sr_object_free(content);
-    /* Note: created is returned via pointer from Rust - do not free with sr_object_free */
     
     /* Patch replace */
     sr_value_t *value = sr_value_string("replaced");
@@ -1345,8 +1334,10 @@ int test_sr_kill(void) {
     sr_string_t err;
     
     /* Create a table first */
-    sr_arr_res_t *res;
-    sr_query(db, &err, &res, "CREATE test_kill SET value = 1", NULL);
+    sr_arr_res_t *res = NULL;
+    int seeded = sr_query(db, &err, &res, "CREATE test_kill SET value = 1", NULL);
+    if (seeded < 0) { if (err) sr_string_free(err); }
+    else sr_arr_res_arr_free(res, seeded);
     
     /* Start a live query */
     sr_stream_t *stream;

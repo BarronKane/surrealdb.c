@@ -305,6 +305,9 @@ impl Surreal {
     /// The resource can be a table name (e.g., "user") for auto-generated IDs,
     /// or a specific record ID (e.g., "user:john").
     ///
+    /// On success the created record is written to `res_ptr` and the caller owns
+    /// it: release it with [`sr_object_free`]. Pass null to discard the result.
+    ///
     /// # Safety
     ///
     /// - `db` must be a valid pointer to a Surreal connection
@@ -316,7 +319,7 @@ impl Surreal {
     pub extern "C" fn create(
         db: &Surreal,
         err_ptr: *mut string_t,
-        res_ptr: *mut &mut Object,
+        res_ptr: *mut Object,
         resource: *const c_char,
         content: *const Object,
     ) -> c_int {
@@ -352,8 +355,11 @@ impl Surreal {
                 }
             };
             if !res_ptr.is_null() {
-                let boxed = Box::new(Object::from(obj));
-                unsafe { res_ptr.write(Box::leak(boxed)) }
+                // Written by value. Boxing here would allocate a second time and
+                // the box itself would be unreachable from C: `sr_object_free`
+                // takes an Object by value and frees its contents, leaving the
+                // outer allocation orphaned. Object is already one pointer wide.
+                unsafe { res_ptr.write(Object::from(obj)) }
                 Ok(1)
             } else {
                 Ok(0)

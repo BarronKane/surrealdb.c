@@ -53,6 +53,8 @@ set_target_properties(test_runner PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${_test_bin_dir}"
 )
 
+surrealdb_apply_sanitizers(test_runner)
+
 # Fix LNK4098: Rust library uses release runtime (/MD), suppress conflict with debug runtime
 if(MSVC)
     target_link_options(test_runner PRIVATE /NODEFAULTLIB:MSVCRT)
@@ -78,6 +80,8 @@ target_link_libraries(test_scratch PRIVATE
 set_target_properties(test_scratch PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${_test_bin_dir}"
 )
+
+surrealdb_apply_sanitizers(test_scratch)
 
 # Fix LNK4098: Rust library uses release runtime (/MD), suppress conflict with debug runtime
 if(MSVC)
@@ -117,6 +121,14 @@ foreach(_group IN LISTS _sdb_test_groups)
         LABELS "${_labels}"
         TIMEOUT 300
     )
+
+    # macOS ships LeakSanitizer disabled by default, so a sanitized run there
+    # would report nothing without this. Harmless on Linux, where it is already
+    # the default.
+    if(SURREALDB_SANITIZE MATCHES "address")
+        set_property(TEST "surrealdb_c.${_group}" APPEND PROPERTY
+                     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1")
+    endif()
 endforeach()
 
 list(LENGTH _sdb_test_groups _sdb_group_count)
