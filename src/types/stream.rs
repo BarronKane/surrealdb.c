@@ -29,17 +29,24 @@ impl Stream {
 impl Stream {
     /// Get the next notification, blocking until one arrives
     ///
+    /// Returns 1 and writes to `notification_ptr` when a notification is received,
+    /// SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+    ///
     /// # Blocking and shutdown
     ///
     /// This call blocks until a notification is available; there is no timeout or
     /// non-blocking variant. It is intended to be driven from a dedicated thread
     /// rather than a latency-sensitive one.
     ///
-    /// To retire that thread, free the connection the stream came from. Doing so
-    /// drops the sending half of the notification channel, and a reader parked
-    /// inside this function returns SR_CLOSED. The stream itself stays valid and
-    /// must still be freed. Freeing the connection is the only way to release a
-    /// blocked reader.
+    /// A stream borrows the runtime owned by the connection it was opened on, so
+    /// teardown is ordered: call `sr_stream_kill` first, then
+    /// `sr_surreal_disconnect`. Disconnecting first drops that runtime out from
+    /// under the stream, and the kill then runs against a runtime that is already
+    /// shut down.
+    ///
+    /// There is no way to release a reader already parked in this call from another
+    /// thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
+    /// this only when an event is expected.
     #[export_name = "sr_stream_next"]
     pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
         match self.rt.block_on(self.inner.next()) {
@@ -61,6 +68,9 @@ impl Stream {
     ///
     /// Closes the stream and releases all associated resources.
     /// The stream must not be used after calling this function.
+    ///
+    /// This runs on the runtime owned by the connection the stream was opened on,
+    /// so it must be called before `sr_surreal_disconnect` on that connection.
     #[export_name = "sr_stream_kill"]
     pub extern "C" fn kill(stream: *mut Stream) {
         let boxed = unsafe { Box::from_raw(stream) };

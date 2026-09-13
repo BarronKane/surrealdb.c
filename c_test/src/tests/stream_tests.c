@@ -63,17 +63,17 @@ TEST(Stream, Next) {
     sr_notification_t notification;
     int got = sr_stream_next(stream, &notification);
 
-    /* A negative result means the stream closed, which is a failure here;
-       zero means no notification was ready, which is timing and not an error. */
-    TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(0, got, "stream must not be closed");
-    if (got > 0) {
-        TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ACTION_CREATE, notification.action,
-                                      "a CREATE should be reported as such");
-        /* The notification owns its data. sr_value_free must not be used on
-           notification.data: that reclaims a Box, and this value lives in our
-           own storage. */
-        sr_notification_free(notification);
-    }
+    /* Only a positive result carries a notification. SR_NONE (0) means the stream
+       ended without delivering the CREATE above, and a negative result is an error
+       or a closed stream; both are failures here. */
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "a notification should be received");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ACTION_CREATE, notification.action,
+                                  "a CREATE should be reported as such");
+    /* The notification owns its data. sr_value_free must not be used on
+       notification.data: that reclaims a Box, and this value lives in our
+       own storage. */
+    sr_notification_free(notification);
 
     sr_stream_kill(stream);
 }

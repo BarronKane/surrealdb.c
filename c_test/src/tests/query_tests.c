@@ -87,7 +87,8 @@ TEST(Query, Run) {
         TEST_FAIL_MESSAGE(msg);
     }
     TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(0, res, "run should succeed");
-    if (result) sr_value_free(result);
+    /* sr_run writes an array of values and returns its length. */
+    if (result) sr_values_free(result, res);
 }
 
 TEST(Query, Kill) {
