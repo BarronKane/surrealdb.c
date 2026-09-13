@@ -167,7 +167,7 @@ int test_sr_authenticate(void) {
     ASSERT_GE(res, 0);
     
     /* First signin to get a token */
-    sr_credentials_scope scope = ROOT;
+    sr_credentials_scope scope = SR_SCOPE_ROOT;
     sr_credentials creds = { "root", "root" };
     
     res = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
@@ -199,7 +199,7 @@ int test_sr_signin(void) {
     ASSERT_GE(res, 0);
     
     /* Test ROOT signin */
-    sr_credentials_scope scope = ROOT;
+    sr_credentials_scope scope = SR_SCOPE_ROOT;
     sr_credentials creds = { "root", "root" };
     
     res = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
@@ -251,7 +251,7 @@ int test_sr_signup(void) {
     sr_arr_res_arr_free(query_res, res);
     
     /* Test RECORD signup */
-    sr_credentials_scope scope = RECORD;
+    sr_credentials_scope scope = SR_SCOPE_RECORD;
     sr_credentials creds = { "testuser", "testpass123" };
     sr_credentials_access details = { "test", "test", "user" };
     
@@ -870,16 +870,16 @@ int test_sr_value_point(void) {
     sr_value_t *val = sr_value_point(10.5, 20.3);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_point);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_POINT);
     /* Verify coordinates */
-    ASSERT_EQ(val->sr_geometry_object.sr_g_point._0.x, 10.5);
-    ASSERT_EQ(val->sr_geometry_object.sr_g_point._0.y, 20.3);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_point._0.x, 10.5);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_point._0.y, 20.3);
     sr_value_free(val);
     return API_TEST_PASS;
 }
 
 int test_sr_value_linestring(void) {
-    sr_sr_g_coord coords[] = {
+    sr_g_coord coords[] = {
         {0.0, 0.0},
         {10.0, 10.0},
         {20.0, 0.0}
@@ -887,16 +887,16 @@ int test_sr_value_linestring(void) {
     sr_value_t *val = sr_value_linestring(coords, 3);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_linestring);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_LINESTRING);
     /* Verify length */
-    ASSERT_EQ(val->sr_geometry_object.sr_g_linestring._0.len, 3);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_linestring._0.len, 3);
     sr_value_free(val);
     return API_TEST_PASS;
 }
 
 int test_sr_value_polygon(void) {
     /* Simple square polygon */
-    sr_sr_g_coord coords[] = {
+    sr_g_coord coords[] = {
         {0.0, 0.0},
         {10.0, 0.0},
         {10.0, 10.0},
@@ -906,15 +906,15 @@ int test_sr_value_polygon(void) {
     sr_value_t *val = sr_value_polygon(coords, 5);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_polygon);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_POLYGON);
     /* Verify exterior ring has 5 coordinates */
-    ASSERT_EQ(val->sr_geometry_object.sr_g_polygon._0._0.len, 5);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_polygon._0._0.len, 5);
     sr_value_free(val);
     return API_TEST_PASS;
 }
 
 int test_sr_value_multipoint(void) {
-    sr_sr_g_coord coords[] = {
+    sr_g_coord coords[] = {
         {1.0, 2.0},
         {3.0, 4.0},
         {5.0, 6.0}
@@ -922,9 +922,9 @@ int test_sr_value_multipoint(void) {
     sr_value_t *val = sr_value_multipoint(coords, 3);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_multipoint);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_MULTIPOINT);
     /* Verify 3 points */
-    ASSERT_EQ(val->sr_geometry_object.sr_g_multipoint._0.len, 3);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_multipoint._0.len, 3);
     sr_value_free(val);
     return API_TEST_PASS;
 }
@@ -1169,34 +1169,34 @@ int test_sr_print_notification(void) {
 
 int test_sr_value_multilinestring(void) {
     /* Create two linestrings */
-    sr_sr_g_coord line1[] = {{0.0, 0.0}, {10.0, 10.0}};
-    sr_sr_g_coord line2[] = {{20.0, 20.0}, {30.0, 30.0}, {40.0, 20.0}};
+    sr_g_coord line1[] = {{0.0, 0.0}, {10.0, 10.0}};
+    sr_g_coord line2[] = {{20.0, 20.0}, {30.0, 30.0}, {40.0, 20.0}};
     
-    const sr_sr_g_coord *lines[] = {line1, line2};
+    const sr_g_coord *lines[] = {line1, line2};
     int lens[] = {2, 3};
     
     sr_value_t *val = sr_value_multilinestring(lines, lens, 2);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_multiline);
-    ASSERT_EQ(val->sr_geometry_object.sr_g_multiline._0.len, 2);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_MULTILINE);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_multiline._0.len, 2);
     sr_value_free(val);
     return API_TEST_PASS;
 }
 
 int test_sr_value_multipolygon(void) {
     /* Create two simple square polygons */
-    sr_sr_g_coord poly1[] = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 10.0}, {0.0, 10.0}, {0.0, 0.0}};
-    sr_sr_g_coord poly2[] = {{20.0, 20.0}, {30.0, 20.0}, {30.0, 30.0}, {20.0, 30.0}, {20.0, 20.0}};
+    sr_g_coord poly1[] = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 10.0}, {0.0, 10.0}, {0.0, 0.0}};
+    sr_g_coord poly2[] = {{20.0, 20.0}, {30.0, 20.0}, {30.0, 30.0}, {20.0, 30.0}, {20.0, 20.0}};
     
-    const sr_sr_g_coord *polys[] = {poly1, poly2};
+    const sr_g_coord *polys[] = {poly1, poly2};
     int lens[] = {5, 5};
     
     sr_value_t *val = sr_value_multipolygon(polys, lens, 2);
     ASSERT_NOT_NULL(val);
     ASSERT_EQ(val->tag, SR_GEOMETRY_OBJECT);
-    ASSERT_EQ(val->sr_geometry_object.tag, sr_g_multipolygon);
-    ASSERT_EQ(val->sr_geometry_object.sr_g_multipolygon._0.len, 2);
+    ASSERT_EQ(val->sr_geometry_object.tag, SR_GEOMETRY_MULTIPOLYGON);
+    ASSERT_EQ(val->sr_geometry_object.sr_geometry_multipolygon._0.len, 2);
     sr_value_free(val);
     return API_TEST_PASS;
 }

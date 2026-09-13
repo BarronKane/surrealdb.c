@@ -241,33 +241,33 @@ impl Drop for sr_g_multipolygon {
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub enum sr_geometry {
-    sr_g_point(sr_g_point),
-    sr_g_linestring(sr_g_linestring),
-    sr_g_polygon(sr_g_polygon),
-    sr_g_multipoint(sr_g_multipoint),
-    sr_g_multiline(sr_g_multilinestring),
-    sr_g_multipolygon(sr_g_multipolygon),
-    sr_g_collection(ArrayGen<sr_geometry>),
+    SR_GEOMETRY_POINT(sr_g_point),
+    SR_GEOMETRY_LINESTRING(sr_g_linestring),
+    SR_GEOMETRY_POLYGON(sr_g_polygon),
+    SR_GEOMETRY_MULTIPOINT(sr_g_multipoint),
+    SR_GEOMETRY_MULTILINE(sr_g_multilinestring),
+    SR_GEOMETRY_MULTIPOLYGON(sr_g_multipolygon),
+    SR_GEOMETRY_COLLECTION(ArrayGen<sr_geometry>),
     /// Represents a geometry type added in a newer version of SurrealDB
     /// that this C API version doesn't yet support
-    sr_g_unimplemented,
+    SR_GEOMETRY_UNIMPLEMENTED,
 }
 
 impl From<&sr_geometry> for Geometry {
     fn from(g: &sr_geometry) -> Self {
         match g {
-            sr_geometry::sr_g_point(p) => Geometry::Point(Point::new(p.0.x, p.0.y)),
-            sr_geometry::sr_g_linestring(l) => Geometry::Line(l.into()),
-            sr_geometry::sr_g_polygon(p) => Geometry::Polygon(p.into()),
-            sr_geometry::sr_g_multipoint(m) => Geometry::MultiPoint(m.into()),
-            sr_geometry::sr_g_multiline(l) => Geometry::MultiLine(l.into()),
-            sr_geometry::sr_g_multipolygon(p) => Geometry::MultiPolygon(p.into()),
+            sr_geometry::SR_GEOMETRY_POINT(p) => Geometry::Point(Point::new(p.0.x, p.0.y)),
+            sr_geometry::SR_GEOMETRY_LINESTRING(l) => Geometry::Line(l.into()),
+            sr_geometry::SR_GEOMETRY_POLYGON(p) => Geometry::Polygon(p.into()),
+            sr_geometry::SR_GEOMETRY_MULTIPOINT(m) => Geometry::MultiPoint(m.into()),
+            sr_geometry::SR_GEOMETRY_MULTILINE(l) => Geometry::MultiLine(l.into()),
+            sr_geometry::SR_GEOMETRY_MULTIPOLYGON(p) => Geometry::MultiPolygon(p.into()),
             // Borrowed rather than `.cloned()`: cloning deep-copied every
             // nested geometry just to convert and discard it.
-            sr_geometry::sr_g_collection(c) => {
+            sr_geometry::SR_GEOMETRY_COLLECTION(c) => {
                 Geometry::Collection(c.as_slice().iter().map(Geometry::from).collect())
             }
-            sr_geometry::sr_g_unimplemented => Geometry::Point(Point::new(0.0, 0.0)),
+            sr_geometry::SR_GEOMETRY_UNIMPLEMENTED => Geometry::Point(Point::new(0.0, 0.0)),
         }
     }
 }
@@ -286,7 +286,7 @@ impl Drop for sr_geometry {
     /// runs. Freeing the array drops each nested geometry in turn, so nested
     /// collections unwind correctly.
     fn drop(&mut self) {
-        if let sr_geometry::sr_g_collection(c) = self {
+        if let sr_geometry::SR_GEOMETRY_COLLECTION(c) = self {
             c.free();
         }
     }
@@ -295,13 +295,13 @@ impl Drop for sr_geometry {
 impl From<Geometry> for sr_geometry {
     fn from(value: Geometry) -> Self {
         match value {
-            Geometry::Point(p) => sr_geometry::sr_g_point(p.into()),
-            Geometry::Line(l) => sr_geometry::sr_g_linestring(l.into()),
-            Geometry::Polygon(p) => sr_geometry::sr_g_polygon(p.into()),
-            Geometry::MultiPoint(p) => sr_geometry::sr_g_multipoint(p.into()),
-            Geometry::MultiLine(l) => sr_geometry::sr_g_multiline(l.into()),
-            Geometry::MultiPolygon(p) => sr_geometry::sr_g_multipolygon(p.into()),
-            Geometry::Collection(c) => sr_geometry::sr_g_collection(
+            Geometry::Point(p) => sr_geometry::SR_GEOMETRY_POINT(p.into()),
+            Geometry::Line(l) => sr_geometry::SR_GEOMETRY_LINESTRING(l.into()),
+            Geometry::Polygon(p) => sr_geometry::SR_GEOMETRY_POLYGON(p.into()),
+            Geometry::MultiPoint(p) => sr_geometry::SR_GEOMETRY_MULTIPOINT(p.into()),
+            Geometry::MultiLine(l) => sr_geometry::SR_GEOMETRY_MULTILINE(l.into()),
+            Geometry::MultiPolygon(p) => sr_geometry::SR_GEOMETRY_MULTIPOLYGON(p.into()),
+            Geometry::Collection(c) => sr_geometry::SR_GEOMETRY_COLLECTION(
                 c.into_iter().map(|g| g.into()).collect::<Vec<sr_geometry>>().make_array()
             ),
         }
@@ -312,7 +312,7 @@ impl From<Value> for sr_geometry {
     fn from(value: Value) -> Self {
         match value {
             Value::SR_GEOMETRY_OBJECT(g) => g,
-            _ => sr_geometry::sr_g_unimplemented,
+            _ => sr_geometry::SR_GEOMETRY_UNIMPLEMENTED,
         }
     }
 }

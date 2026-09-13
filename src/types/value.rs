@@ -420,7 +420,7 @@ impl Value {
     pub extern "C" fn value_point(x: f64, y: f64) -> *mut Value {
         use crate::geometry::{sr_g_coord, sr_g_point, sr_geometry};
         let point = sr_g_point(sr_g_coord { x, y });
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_point(point))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_POINT(point))))
     }
 
     /// Create a LineString geometry value from an array of coordinates
@@ -433,13 +433,13 @@ impl Value {
         if coords.is_null() || len <= 0 {
             // Return empty linestring
             let ls = sr_g_linestring(Vec::new().make_array());
-            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_linestring(ls))));
+            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_LINESTRING(ls))));
         }
         
         let slice = unsafe { std::slice::from_raw_parts(coords, len as usize) };
         let vec: Vec<crate::geometry::sr_g_coord> = slice.to_vec();
         let ls = sr_g_linestring(vec.make_array());
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_linestring(ls))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_LINESTRING(ls))))
     }
 
     /// Create a simple Polygon geometry value from exterior ring coordinates
@@ -454,7 +454,7 @@ impl Value {
             let exterior = sr_g_linestring(Vec::new().make_array());
             let interiors: Vec<sr_g_linestring> = Vec::new();
             let poly = sr_g_polygon(exterior, interiors.make_array());
-            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_polygon(poly))));
+            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_POLYGON(poly))));
         }
         
         let slice = unsafe { std::slice::from_raw_parts(coords, len as usize) };
@@ -462,7 +462,7 @@ impl Value {
         let exterior = sr_g_linestring(vec.make_array());
         let interiors: Vec<sr_g_linestring> = Vec::new();
         let poly = sr_g_polygon(exterior, interiors.make_array());
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_polygon(poly))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_POLYGON(poly))))
     }
 
     /// Create a MultiPoint geometry value from an array of points (x,y pairs)
@@ -475,7 +475,7 @@ impl Value {
         if coords.is_null() || len <= 0 {
             // Return empty multipoint
             let mp = sr_g_multipoint(Vec::<sr_g_point>::new().make_array());
-            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multipoint(mp))));
+            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTIPOINT(mp))));
         }
         
         let slice = unsafe { std::slice::from_raw_parts(coords, len as usize) };
@@ -483,7 +483,7 @@ impl Value {
             .map(|c| sr_g_point(sr_g_coord { x: c.x, y: c.y }))
             .collect();
         let mp = sr_g_multipoint(points.make_array());
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multipoint(mp))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTIPOINT(mp))))
     }
 
     /// Create a MultiLineString geometry value
@@ -501,7 +501,7 @@ impl Value {
         
         if linestrings.is_null() || lens.is_null() || count <= 0 {
             let mls = sr_g_multilinestring(Vec::<sr_g_linestring>::new().make_array());
-            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multiline(mls))));
+            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTILINE(mls))));
         }
         
         let linestring_ptrs = unsafe { std::slice::from_raw_parts(linestrings, count as usize) };
@@ -520,7 +520,7 @@ impl Value {
             .collect();
         
         let mls = sr_g_multilinestring(lines.make_array());
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multiline(mls))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTILINE(mls))))
     }
 
     /// Create a MultiPolygon geometry value
@@ -538,7 +538,7 @@ impl Value {
         
         if polygons.is_null() || lens.is_null() || count <= 0 {
             let mpoly = sr_g_multipolygon(Vec::<sr_g_polygon>::new().make_array());
-            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multipolygon(mpoly))));
+            return Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTIPOLYGON(mpoly))));
         }
         
         let polygon_ptrs = unsafe { std::slice::from_raw_parts(polygons, count as usize) };
@@ -559,7 +559,7 @@ impl Value {
             .collect();
         
         let mpoly = sr_g_multipolygon(polys.make_array());
-        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::sr_g_multipolygon(mpoly))))
+        Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(sr_geometry::SR_GEOMETRY_MULTIPOLYGON(mpoly))))
     }
 
     /// Create a Decimal value from string representation

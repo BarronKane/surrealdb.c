@@ -12,6 +12,7 @@
  * - Graph relations between entities
  * - Complex queries with aggregations
  * - Runtime options: timeouts and the capability sandbox
+ * - Geometry values (service regions as polygons)
  * 
  * Tables:
  *   - organization: Tenant/company accounts
@@ -236,6 +237,13 @@ int main(void) {
     print_separator("Step 4: Creating Organizations");
     
     // Organization 1: TechStartup Inc
+    /* Organizations carry a service region as a polygon. Geometry is a
+       first-class value type, so it goes in as a value rather than as text --
+       the field comes back as SR_GEOMETRY_OBJECT, not a string. */
+    static const sr_g_coord us_west[] = {
+        {-124.4, 32.5}, {-114.1, 32.5}, {-114.1, 42.0}, {-124.4, 42.0}, {-124.4, 32.5}
+    };
+
     sr_object_t org1 = sr_object_new();
     sr_object_insert_str(&org1, "name", "TechStartup Inc");
     sr_object_insert_str(&org1, "slug", "techstartup");
@@ -244,6 +252,10 @@ int main(void) {
     sr_object_insert_str(&org1, "created_at", "2024-01-15T10:00:00Z");
     sr_object_insert_str(&org1, "status", "active");
     
+    sr_value_t* region = sr_value_polygon(us_west, 5);
+    sr_object_insert(&org1, "service_region", region);
+    sr_value_free(region);
+
     sr_object_t org1_result;
     result = sr_create(db, &err, &org1_result, "organization:techstartup", &org1);
     CHECK_ERROR(result, err, "Failed to create organization");

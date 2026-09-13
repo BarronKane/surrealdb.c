@@ -1372,7 +1372,7 @@ impl Surreal {
     /// sr_string_t err;
     /// sr_string_t token;
     ///
-    /// sr_credentials_scope scope = sr_credentials_scope::ROOT;
+    /// sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_ROOT;
     /// const sr_string_t user = "<user>";
     /// // SHOULD NEVER BE HARDCODED
     /// const sr_string_t password = "<password>";
@@ -1393,7 +1393,7 @@ impl Surreal {
     /// sr_string_t err;
     /// sr_string_t token;
     ///
-    /// sr_credentials_scope scope = sr_credentials_scope::DATABASE;
+    /// sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_DATABASE;
     /// const sr_string_t user = "<user>";
     /// // SHOULD NEVER BE HARDCODED
     /// const sr_string_t password = "<password>";
@@ -1468,7 +1468,7 @@ impl Surreal {
             }
 
             let token: String = match scope {
-                credentials_scope::ROOT => {
+                credentials_scope::SR_SCOPE_ROOT => {
                     let login = auth::Root {
                         username: user.to_string(),
                         password: pass.to_string(),
@@ -1476,7 +1476,7 @@ impl Surreal {
                     let jwt = surreal.db.signin(login).await.map_err(|e| string_t::from(e.to_string()))?;
                     jwt.access.into_insecure_token()
                 }
-                credentials_scope::NAMESPACE => {
+                credentials_scope::SR_SCOPE_NAMESPACE => {
                     if ns.is_empty() {
                         return Err("Namespace must be provided.".into());
                     }
@@ -1490,7 +1490,7 @@ impl Surreal {
                     let jwt = surreal.db.signin(login).await.map_err(|e| string_t::from(e.to_string()))?;
                     jwt.access.into_insecure_token()
                 }
-                credentials_scope::DATABASE => {
+                credentials_scope::SR_SCOPE_DATABASE => {
                     if ns.is_empty() {
                         return Err("Namespace must be provided.".into());
                     }
@@ -1508,7 +1508,7 @@ impl Surreal {
                     let jwt = surreal.db.signin(login).await.map_err(|e| string_t::from(e.to_string()))?;
                     jwt.access.into_insecure_token()
                 }
-                credentials_scope::RECORD => {
+                credentials_scope::SR_SCOPE_RECORD => {
                     if ns.is_empty() {
                         return Err("Namespace must be provided.".into());
                     }
@@ -1560,7 +1560,7 @@ impl Surreal {
     /// sr_surreal_t *db;
     /// sr_string_t err;
     /// sr_string_t token;
-    /// sr_credentials_scope scope = sr_credentials_scope::RECORD;
+    /// sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_RECORD;
     /// const sr_string_t user = "newuser";
     /// const sr_string_t password = "password123";
     /// sr_credentials creds = sr_credentials {
@@ -1637,16 +1637,16 @@ impl Surreal {
             }
 
             let token: String = match scope {
-                credentials_scope::ROOT => {
+                credentials_scope::SR_SCOPE_ROOT => {
                     return Err("Cannot signup as ROOT user".into());
                 }
-                credentials_scope::NAMESPACE => {
+                credentials_scope::SR_SCOPE_NAMESPACE => {
                     return Err("Namespace scope does not support signup. Use RECORD scope instead.".into());
                 }
-                credentials_scope::DATABASE => {
+                credentials_scope::SR_SCOPE_DATABASE => {
                     return Err("Database scope does not support signup. Use RECORD scope instead.".into());
                 }
-                credentials_scope::RECORD => {
+                credentials_scope::SR_SCOPE_RECORD => {
                     if ns.is_empty() {
                         return Err("Namespace must be provided.".into());
                     }

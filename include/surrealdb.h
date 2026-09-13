@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 1
-#define SR_VERSION_STRING "0.2.1"
+#define SR_VERSION_PATCH 2
+#define SR_VERSION_STRING "0.2.2"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -60,10 +60,10 @@ typedef enum sr_target_mode_t {
 } sr_target_mode_t;
 
 typedef enum sr_credentials_scope {
-  ROOT,
-  NAMESPACE,
-  DATABASE,
-  RECORD,
+  SR_SCOPE_ROOT,
+  SR_SCOPE_NAMESPACE,
+  SR_SCOPE_DATABASE,
+  SR_SCOPE_RECORD,
 } sr_credentials_scope;
 
 typedef enum sr_action {
@@ -280,102 +280,102 @@ typedef struct sr_array_t {
   int len;
 } sr_array_t;
 
-typedef struct sr_sr_g_coord {
+typedef struct sr_g_coord {
   double x;
   double y;
-} sr_sr_g_coord;
+} sr_g_coord;
 
-typedef struct sr_sr_g_point {
-  struct sr_sr_g_coord _0;
-} sr_sr_g_point;
+typedef struct sr_g_point {
+  struct sr_g_coord _0;
+} sr_g_point;
 
-typedef struct sr_ArrayGen_sr_g_coord {
-  struct sr_sr_g_coord *ptr;
+typedef struct sr_g_coord_arr_t {
+  struct sr_g_coord *ptr;
   int len;
-} sr_ArrayGen_sr_g_coord;
+} sr_g_coord_arr_t;
 
-typedef struct sr_sr_g_linestring {
-  struct sr_ArrayGen_sr_g_coord _0;
-} sr_sr_g_linestring;
+typedef struct sr_g_linestring {
+  struct sr_g_coord_arr_t _0;
+} sr_g_linestring;
 
-typedef struct sr_ArrayGen_sr_g_linestring {
-  struct sr_sr_g_linestring *ptr;
+typedef struct sr_g_linestring_arr_t {
+  struct sr_g_linestring *ptr;
   int len;
-} sr_ArrayGen_sr_g_linestring;
+} sr_g_linestring_arr_t;
 
-typedef struct sr_sr_g_polygon {
-  struct sr_sr_g_linestring _0;
-  struct sr_ArrayGen_sr_g_linestring _1;
-} sr_sr_g_polygon;
+typedef struct sr_g_polygon {
+  struct sr_g_linestring _0;
+  struct sr_g_linestring_arr_t _1;
+} sr_g_polygon;
 
-typedef struct sr_ArrayGen_sr_g_point {
-  struct sr_sr_g_point *ptr;
+typedef struct sr_g_point_arr_t {
+  struct sr_g_point *ptr;
   int len;
-} sr_ArrayGen_sr_g_point;
+} sr_g_point_arr_t;
 
-typedef struct sr_sr_g_multipoint {
-  struct sr_ArrayGen_sr_g_point _0;
-} sr_sr_g_multipoint;
+typedef struct sr_g_multipoint {
+  struct sr_g_point_arr_t _0;
+} sr_g_multipoint;
 
-typedef struct sr_sr_g_multilinestring {
-  struct sr_ArrayGen_sr_g_linestring _0;
-} sr_sr_g_multilinestring;
+typedef struct sr_g_multilinestring {
+  struct sr_g_linestring_arr_t _0;
+} sr_g_multilinestring;
 
-typedef struct sr_ArrayGen_sr_g_polygon {
-  struct sr_sr_g_polygon *ptr;
+typedef struct sr_g_polygon_arr_t {
+  struct sr_g_polygon *ptr;
   int len;
-} sr_ArrayGen_sr_g_polygon;
+} sr_g_polygon_arr_t;
 
-typedef struct sr_sr_g_multipolygon {
-  struct sr_ArrayGen_sr_g_polygon _0;
-} sr_sr_g_multipolygon;
+typedef struct sr_g_multipolygon {
+  struct sr_g_polygon_arr_t _0;
+} sr_g_multipolygon;
 
-typedef struct sr_ArrayGen_sr_geometry {
-  struct sr_sr_geometry *ptr;
+typedef struct sr_geometry_arr_t {
+  struct sr_geometry_t *ptr;
   int len;
-} sr_ArrayGen_sr_geometry;
+} sr_geometry_arr_t;
 
-typedef enum sr_sr_geometry_Tag {
-  sr_g_point,
-  sr_g_linestring,
-  sr_g_polygon,
-  sr_g_multipoint,
-  sr_g_multiline,
-  sr_g_multipolygon,
-  sr_g_collection,
+typedef enum sr_geometry_t_Tag {
+  SR_GEOMETRY_POINT,
+  SR_GEOMETRY_LINESTRING,
+  SR_GEOMETRY_POLYGON,
+  SR_GEOMETRY_MULTIPOINT,
+  SR_GEOMETRY_MULTILINE,
+  SR_GEOMETRY_MULTIPOLYGON,
+  SR_GEOMETRY_COLLECTION,
   /**
    * Represents a geometry type added in a newer version of SurrealDB
    * that this C API version doesn't yet support
    */
-  sr_g_unimplemented,
-} sr_sr_geometry_Tag;
+  SR_GEOMETRY_UNIMPLEMENTED,
+} sr_geometry_t_Tag;
 
-typedef struct sr_sr_geometry {
-  sr_sr_geometry_Tag tag;
+typedef struct sr_geometry_t {
+  sr_geometry_t_Tag tag;
   union {
     struct {
-      struct sr_sr_g_point sr_g_point;
+      struct sr_g_point sr_geometry_point;
     };
     struct {
-      struct sr_sr_g_linestring sr_g_linestring;
+      struct sr_g_linestring sr_geometry_linestring;
     };
     struct {
-      struct sr_sr_g_polygon sr_g_polygon;
+      struct sr_g_polygon sr_geometry_polygon;
     };
     struct {
-      struct sr_sr_g_multipoint sr_g_multipoint;
+      struct sr_g_multipoint sr_geometry_multipoint;
     };
     struct {
-      struct sr_sr_g_multilinestring sr_g_multiline;
+      struct sr_g_multilinestring sr_geometry_multiline;
     };
     struct {
-      struct sr_sr_g_multipolygon sr_g_multipolygon;
+      struct sr_g_multipolygon sr_geometry_multipolygon;
     };
     struct {
-      struct sr_ArrayGen_sr_geometry sr_g_collection;
+      struct sr_geometry_arr_t sr_geometry_collection;
     };
   };
-} sr_sr_geometry;
+} sr_geometry_t;
 
 typedef struct sr_bytes_t {
   uint8_t *arr;
@@ -585,7 +585,7 @@ typedef struct sr_value_t {
       struct sr_object_t sr_value_object;
     };
     struct {
-      struct sr_sr_geometry sr_geometry_object;
+      struct sr_geometry_t sr_geometry_object;
     };
     struct {
       struct sr_bytes_t sr_value_bytes;
@@ -1388,7 +1388,7 @@ int sr_set(const struct sr_surreal_t *db,
  * sr_string_t err;
  * sr_string_t token;
  *
- * sr_credentials_scope scope = sr_credentials_scope::ROOT;
+ * sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_ROOT;
  * const sr_string_t user = "<user>";
  * // SHOULD NEVER BE HARDCODED
  * const sr_string_t password = "<password>";
@@ -1409,7 +1409,7 @@ int sr_set(const struct sr_surreal_t *db,
  * sr_string_t err;
  * sr_string_t token;
  *
- * sr_credentials_scope scope = sr_credentials_scope::DATABASE;
+ * sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_DATABASE;
  * const sr_string_t user = "<user>";
  * // SHOULD NEVER BE HARDCODED
  * const sr_string_t password = "<password>";
@@ -1461,7 +1461,7 @@ int sr_signin(const struct sr_surreal_t *db,
  * sr_surreal_t *db;
  * sr_string_t err;
  * sr_string_t token;
- * sr_credentials_scope scope = sr_credentials_scope::RECORD;
+ * sr_credentials_scope scope = sr_credentials_scope::SR_SCOPE_RECORD;
  * const sr_string_t user = "newuser";
  * const sr_string_t password = "password123";
  * sr_credentials creds = sr_credentials {
@@ -2201,19 +2201,19 @@ struct sr_value_t *sr_value_point(double x, double y);
  * Create a LineString geometry value from an array of coordinates
  * coords is a pointer to an array of sr_g_coord structures
  */
-struct sr_value_t *sr_value_linestring(const struct sr_sr_g_coord *coords, int len);
+struct sr_value_t *sr_value_linestring(const struct sr_g_coord *coords, int len);
 
 /**
  * Create a simple Polygon geometry value from exterior ring coordinates
  * coords is a pointer to an array of sr_g_coord structures for the exterior ring
  */
-struct sr_value_t *sr_value_polygon(const struct sr_sr_g_coord *coords, int len);
+struct sr_value_t *sr_value_polygon(const struct sr_g_coord *coords, int len);
 
 /**
  * Create a MultiPoint geometry value from an array of points (x,y pairs)
  * coords is a pointer to an array of sr_g_coord structures
  */
-struct sr_value_t *sr_value_multipoint(const struct sr_sr_g_coord *coords, int len);
+struct sr_value_t *sr_value_multipoint(const struct sr_g_coord *coords, int len);
 
 /**
  * Create a MultiLineString geometry value
@@ -2221,7 +2221,7 @@ struct sr_value_t *sr_value_multipoint(const struct sr_sr_g_coord *coords, int l
  * lens is an array of lengths for each linestring
  * count is the number of linestrings
  */
-struct sr_value_t *sr_value_multilinestring(const struct sr_sr_g_coord *const *linestrings,
+struct sr_value_t *sr_value_multilinestring(const struct sr_g_coord *const *linestrings,
                                             const int *lens,
                                             int count);
 
@@ -2231,7 +2231,7 @@ struct sr_value_t *sr_value_multilinestring(const struct sr_sr_g_coord *const *l
  * lens is an array of lengths for each polygon's exterior ring
  * count is the number of polygons
  */
-struct sr_value_t *sr_value_multipolygon(const struct sr_sr_g_coord *const *polygons,
+struct sr_value_t *sr_value_multipolygon(const struct sr_g_coord *const *polygons,
                                          const int *lens,
                                          int count);
 

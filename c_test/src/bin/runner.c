@@ -20,6 +20,7 @@ extern void RunTestGroup_LegacyApi(void);
 extern void RunTestGroup_Auth(void);
 extern void RunTestGroup_Connection(void);
 extern void RunTestGroup_CRUD(void);
+extern void RunTestGroup_Geometry(void);
 extern void RunTestGroup_IO(void);
 extern void RunTestGroup_Memory(void);
 extern void RunTestGroup_Object(void);
@@ -39,6 +40,7 @@ void sr_run_all_test_groups(void)
     RUN_TEST_GROUP(Auth);
     RUN_TEST_GROUP(Connection);
     RUN_TEST_GROUP(CRUD);
+    RUN_TEST_GROUP(Geometry);
     RUN_TEST_GROUP(IO);
     RUN_TEST_GROUP(Memory);
     RUN_TEST_GROUP(Object);

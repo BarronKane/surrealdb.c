@@ -7,7 +7,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/AppleDeploymentTarget.cmake)
 # CXX is enabled despite there being no C++ sources: some IDEs (Visual Studio in
 # particular) generate a more useful project when the language is present, and
 # consumers of this library are frequently C++.
-project(surrealdb_c VERSION 0.2.1 LANGUAGES C CXX)
+project(surrealdb_c VERSION 0.2.2 LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Project Configuration

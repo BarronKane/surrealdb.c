@@ -30,7 +30,7 @@ TEST(Auth, Signin) {
     sr_string_t token = NULL;
     
     // Test ROOT signin - in-memory DB may not support this
-    sr_credentials_scope scope = ROOT;
+    sr_credentials_scope scope = SR_SCOPE_ROOT;
     sr_credentials creds = { "root", "root" };
     
     int result = sr_signin(db, &err, &token, &scope, &creds, NULL, NULL);
@@ -69,7 +69,7 @@ TEST(Auth, Signup) {
     
     // Test RECORD signup
     sr_string_t token = NULL;
-    sr_credentials_scope scope = RECORD;
+    sr_credentials_scope scope = SR_SCOPE_RECORD;
     sr_credentials creds = { "testuser", "testpass123" };
     sr_credentials_access details = { "test_ns", "test_db", "user" };
     
@@ -107,7 +107,7 @@ TEST(Auth, AuthenticateAndInvalidate) {
     if (n > 0) sr_arr_res_arr_free(define, n);
 
     sr_string_t token = NULL;
-    sr_credentials_scope scope = RECORD;
+    sr_credentials_scope scope = SR_SCOPE_RECORD;
     sr_credentials creds = { "authtest", "hunter2hunter2" };
     sr_credentials_access access = { "test_ns", "test_db", "acct" };
 
