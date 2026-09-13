@@ -138,6 +138,65 @@ TEST(RPC, StreamNextUnblocksOnShutdown) {
     sr_rpc_stream_free(stream);
 }
 
+/* A hand-rolled CBOR map: {"method": <name>, "params": [<arg>]}. Encoding this
+   by hand keeps the test suite free of a CBOR dependency; the request shape is
+   small enough that doing so stays readable. */
+static int rpc_request_1(uint8_t *buf, int cap, const char *method, const char *arg) {
+    const int mlen = (int)strlen(method), alen = (int)strlen(arg);
+    if (mlen > 23 || alen > 255 || cap < 32 + mlen + alen) return -1;
+    int i = 0;
+    buf[i++] = 0xA2;                                   /* map(2) */
+    buf[i++] = 0x66; memcpy(buf + i, "method", 6); i += 6;
+    buf[i++] = (uint8_t)(0x60 | mlen); memcpy(buf + i, method, (size_t)mlen); i += mlen;
+    buf[i++] = 0x66; memcpy(buf + i, "params", 6); i += 6;
+    buf[i++] = 0x81;                                   /* array(1) */
+    if (alen < 24) { buf[i++] = (uint8_t)(0x60 | alen); }
+    else { buf[i++] = 0x78; buf[i++] = (uint8_t)alen; }
+    memcpy(buf + i, arg, (size_t)alen); i += alen;
+    return i;
+}
+
+/*
+ * `query` is the method the whole RPC surface exists for, and it was
+ * unreachable: run_rpc matched only DbResult::Other, so `query` and `gql` --
+ * the two methods that return DbResult::Query -- came back as
+ * "RPC::execute had unimplemented response". Nothing caught it because the
+ * other tests only drive methods that return Other (ping, info, version, use).
+ */
+TEST(RPC, QueryIsReachable) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    uint8_t req[128];
+    int n = rpc_request_1(req, (int)sizeof(req), "query", "RETURN 1;");
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+
+    uint8_t *res = NULL;
+    int rc = sr_surreal_rpc_execute(rpc, &err, &res, req, n);
+
+    if (rc < 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "query over RPC should succeed: %s",
+                 err ? (const char *)err : "(no error)");
+        if (err) { sr_string_free(err); err = NULL; }
+        sr_surreal_rpc_disconnect(rpc);
+        TEST_FAIL_MESSAGE(msg);
+    }
+
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, rc, "a query response should carry bytes");
+    TEST_ASSERT_NOT_NULL_MESSAGE(res, "a query response should be written");
+
+    sr_byte_arr_free(res, rc);
+    if (err) sr_string_free(err);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
 TEST(RPC, Free) {
     sr_surreal_rpc_t *rpc;
     sr_string_t err;
@@ -153,5 +212,6 @@ TEST_GROUP_RUNNER(RPC) {
     RUN_TEST_CASE(RPC, Execute);
     RUN_TEST_CASE(RPC, Notifications);
     RUN_TEST_CASE(RPC, StreamNextUnblocksOnShutdown);
+    RUN_TEST_CASE(RPC, QueryIsReachable);
     RUN_TEST_CASE(RPC, Free);
 }

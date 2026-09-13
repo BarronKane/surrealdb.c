@@ -10,7 +10,7 @@ use async_channel::Receiver;
 use surrealdb_core::dbs::Session;
 use surrealdb_core::kvs::{Builder, Datastore};
 use surrealdb_core::rpc::{Method, RpcProtocol, DbResult};
-use surrealdb::types::{Value as sdbValue, HashMap, Notification as PublicNotification};
+use surrealdb::types::{Value as sdbValue, HashMap, Notification as PublicNotification, SurrealValue};
 use tokio::{runtime::Runtime, sync::RwLock};
 
 use crate::{array::{ArrayGen, MakeArray}, opts::Options, stream::RpcStream, string::string_t, uuid::Uuid, write_error, SR_ERROR, SR_FATAL};
@@ -592,18 +592,20 @@ async fn run_rpc(
     .await
     .map_err(|e| string_t::from(e.to_string()))?;
 
-    match res {
-        DbResult::Other(v) => {
-            let cbor_val = value_to_cbor(&v);
-            let mut out_bytes = Vec::new();
-            ciborium::into_writer(&cbor_val, &mut out_bytes)
-                .map_err(|e| string_t::from(format!("CBOR encode error: {e}")))?;
-            let out = out_bytes.make_array();
-            unsafe { res_ptr.write(out.ptr) }
-            Ok(out.len)
-        }
-        _ => Err(string_t::from("C SDK: RPC::execute had unimplemented response.")),
-    }
+    // Every DbResult variant is encoded, not just `Other`. `query` and `gql`
+    // return `DbResult::Query`, so matching on `Other` alone made them
+    // unreachable over RPC. `into_value` is core's own canonical mapping -- the
+    // one the WebSocket and HTTP servers use -- so a C caller sees the same
+    // shape as any other SurrealDB client: a query yields an array with one
+    // entry per statement.
+    let v = res.into_value();
+    let cbor_val = value_to_cbor(&v);
+    let mut out_bytes = Vec::new();
+    ciborium::into_writer(&cbor_val, &mut out_bytes)
+        .map_err(|e| string_t::from(format!("CBOR encode error: {e}")))?;
+    let out = out_bytes.make_array();
+    unsafe { res_ptr.write(out.ptr) }
+    Ok(out.len)
 }
 
 /// Free the uuid array returned by `sr_rpc_session_list`.
