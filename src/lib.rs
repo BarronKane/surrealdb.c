@@ -41,6 +41,7 @@ use array::{Array, ArrayGen, MakeArray};
 pub use types::*;
 use utils::CStringExt2;
 use value::{Object, Value};
+use crate::opts::Options;
 use crate::credentials::{credentials_scope, credentials_access};
 
 pub const SR_NONE: c_int = 0;
@@ -52,7 +53,7 @@ pub const SR_FATAL: c_int = -3;
 /// 
 /// If `err_ptr` is null, the error is silently ignored.
 #[inline]
-fn write_error(err_ptr: *mut string_t, msg: impl Into<string_t>) {
+pub(crate) fn write_error(err_ptr: *mut string_t, msg: impl Into<string_t>) {
     if !err_ptr.is_null() {
         unsafe { err_ptr.write(msg.into()) };
     }
@@ -130,6 +131,41 @@ impl Surreal {
         check_null!(surreal_ptr, err_ptr, "surreal_ptr is null");
         check_null!(endpoint, err_ptr, "endpoint is null");
 
+        Self::connect_inner(err_ptr, surreal_ptr, endpoint, None)
+    }
+
+    /// Connect with explicit options.
+    ///
+    /// `sr_connect` uses the server defaults for everything. This takes the
+    /// same `Options` as `sr_surreal_rpc_new`, so query and transaction
+    /// timeouts and the capability sandbox can be set on the direct path too.
+    ///
+    /// `session_dir` is ignored here: sessions belong to an RPC context, and
+    /// this path has no session map of its own.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `surreal_ptr` must be a valid pointer to receive the connection
+    /// - `endpoint` must be a valid null-terminated UTF-8 string
+    #[export_name = "sr_connect_with_options"]
+    pub extern "C" fn connect_with_options(
+        err_ptr: *mut string_t,
+        surreal_ptr: *mut *mut Surreal,
+        endpoint: *const c_char,
+        options: Options,
+    ) -> c_int {
+        check_null!(surreal_ptr, err_ptr, "surreal_ptr is null");
+        check_null!(endpoint, err_ptr, "endpoint is null");
+        Self::connect_inner(err_ptr, surreal_ptr, endpoint, Some(options))
+    }
+
+    fn connect_inner(
+        err_ptr: *mut string_t,
+        surreal_ptr: *mut *mut Surreal,
+        endpoint: *const c_char,
+        options: Option<Options>,
+    ) -> c_int {
         let res: Result<Result<Surreal, string_t>, _> = catch_unwind(AssertUnwindSafe(|| {
             let Ok(endpoint) = (unsafe { CStr::from_ptr(endpoint).to_str() }) else {
                 return Err("invalid utf8".into());
@@ -139,7 +175,38 @@ impl Surreal {
                 return Err("error creating runtime".into());
             };
 
-            let con_fut = any::connect(endpoint);
+            // Without options this stays exactly as it was: a bare endpoint,
+            // no Config, so nothing about the default path changes.
+            let con_fut = match options {
+                None => any::connect(endpoint),
+                Some(opts) => {
+                    let mut config = surrealdb::opt::Config::new();
+                    if opts.query_timeout != 0 {
+                        config = config.query_timeout(std::time::Duration::from_secs(
+                            opts.query_timeout as u64,
+                        ));
+                    }
+                    if opts.transaction_timeout != 0 {
+                        config = config.transaction_timeout(std::time::Duration::from_secs(
+                            opts.transaction_timeout as u64,
+                        ));
+                    }
+                    match opts.capabilities.to_capabilities() {
+                        // The SDK wraps the core type; the conversion is
+                        // documented as not-public-API but is the only route,
+                        // and Config::capabilities takes the wrapper.
+                        Ok(Some(caps)) => {
+                            config = config
+                                .capabilities(surrealdb::opt::capabilities::Capabilities::from(
+                                    caps,
+                                ))
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Err(string_t::from(e)),
+                    }
+                    any::connect((endpoint.to_owned(), config))
+                }
+            };
 
             let db = match rt.block_on(con_fut.into_future()) {
                 Ok(db) => db,
@@ -1891,20 +1958,35 @@ where
     C: FnOnce(&'a Surreal) -> F + 'b,
     F: std::future::Future<Output = Result<c_int, string_t>>,
 {
+    // A poisoned connection reports SR_FATAL rather than aborting. The header
+    // has always documented the poisoning contract, but nothing ever set the
+    // flag, so `ps` was write-only and the abort below it unreachable. Taking
+    // the host process down from inside a library is also the wrong answer for
+    // an embedded consumer -- in a game engine plugin it would take the editor
+    // with it.
     if db.ps.load(Ordering::Acquire) {
-        std::process::abort()
+        write_error(err_ptr, "connection is poisoned: an earlier operation returned SR_FATAL");
+        return SR_FATAL;
     }
     let _guard = db.rt.enter();
 
+    // These go through write_error rather than writing err_ptr directly: the
+    // header documents err_ptr as "a valid pointer or null" on every function
+    // routed through here, and an unconditional write segfaults on the null
+    // case. Only the failure paths were affected, so it held up in testing and
+    // crashed exactly when something had already gone wrong.
     let res = match catch_unwind(AssertUnwindSafe(|| db.rt.block_on(fun(&db)))) {
         Ok(r) => r,
         Err(e) => {
             if let Some(e_str) = e.downcast_ref::<&str>() {
-                let e_string: string_t = format!("Panicked with: {e_str}").into();
-                unsafe { err_ptr.write(e_string) }
+                write_error(err_ptr, format!("Panicked with: {e_str}"));
             } else {
-                unsafe { err_ptr.write("Panicked".into()) }
+                write_error(err_ptr, "Panicked");
             }
+            // Make the documented contract real: a panic crossing the FFI
+            // boundary leaves the datastore in an unknown state, so the handle
+            // is poisoned from here on.
+            db.ps.store(true, Ordering::Release);
             return SR_FATAL;
         }
     };
@@ -1912,7 +1994,7 @@ where
     match res {
         Ok(n) => n,
         Err(e) => {
-            unsafe { err_ptr.write(e) }
+            write_error(err_ptr, e);
             SR_ERROR
         }
     }

@@ -128,6 +128,10 @@ foreach(_group IN LISTS _sdb_test_groups)
     if(SURREALDB_SANITIZE MATCHES "address")
         set_property(TEST "surrealdb_c.${_group}" APPEND PROPERTY
                      ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1")
+        # Without this the suite fails roughly one run in six on the groups that
+        # do async work -- see the file for what is suppressed and why.
+        set_property(TEST "surrealdb_c.${_group}" APPEND PROPERTY
+                     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
     endif()
 endforeach()
 

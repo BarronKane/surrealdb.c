@@ -11,6 +11,7 @@
  * - Usage tracking and analytics
  * - Graph relations between entities
  * - Complex queries with aggregations
+ * - Runtime options: timeouts and the capability sandbox
  * 
  * Tables:
  *   - organization: Tenant/company accounts
@@ -82,9 +83,45 @@ int main(void) {
     // ========================================================================
     print_separator("Step 1: Connecting to Database");
     
-    result = sr_connect(&err, &db, "mem://");
+    /*
+     * Connect with explicit runtime options rather than the bare
+     * sr_connect(&err, &db, "mem://").
+     *
+     * Every field of sr_option_t defaults to "leave SurrealDB's default
+     * alone", so a zero-initialised struct behaves exactly like sr_connect.
+     * A multi-tenant platform is precisely the case where you want to say more
+     * than that: bound how long a query may run, and pin down what the database
+     * is permitted to do.
+     */
+    sr_option_t opts = {0};
+
+    /* Nothing should be able to hang a request indefinitely. */
+    opts.query_timeout = 30;
+    opts.transaction_timeout = 30;
+
+    /* Capabilities are a sandbox. Outbound network access is denied by
+     * SurrealDB's defaults, and stays denied here -- a tenant-facing service
+     * has no business making arbitrary outbound requests. Scripting is off by
+     * default too; it is spelled out rather than left implicit because turning
+     * it on later should be a visible decision.
+     */
+    opts.capabilities.scripting = SR_TOGGLE_OFF;
+    opts.capabilities.allow_network.mode = SR_TARGET_NONE;
+
+    /* Deny wins over allow, so this forbids the two functions that can reach
+     * the filesystem or the network even though functions are allowed broadly.
+     */
+    static const char* const denied_funcs[] = { "http", "crypto::argon2" };
+    opts.capabilities.deny_functions.mode = SR_TARGET_SOME;
+    opts.capabilities.deny_functions.items = denied_funcs;
+    opts.capabilities.deny_functions.len = 2;
+
+    result = sr_connect_with_options(&err, &db, "mem://", opts);
     CHECK_ERROR(result, err, "Failed to connect");
     printf("  [OK] Connected to in-memory database\n");
+    printf("  [OK] Query/transaction timeout: 30s\n");
+    printf("  [OK] Capabilities: scripting off, no outbound network,\n");
+    printf("       http and crypto::argon2 denied\n");
     
     result = sr_use_ns(db, &err, "saas_platform");
     CHECK_ERROR(result, err, "Failed to set namespace");
@@ -108,11 +145,11 @@ int main(void) {
     sr_object_insert_int(&plan_free, "storage_gb", 1);
     sr_object_insert_str(&plan_free, "support_level", "community");
     
-    sr_object_t* plan_free_result = NULL;
+    sr_object_t plan_free_result;
     result = sr_create(db, &err, &plan_free_result, "plan:free", &plan_free);
     CHECK_ERROR(result, err, "Failed to create free plan");
     printf("  [OK] Created plan: Free ($0/mo, 3 users, 1GB storage)\n");
-    if (plan_free_result) sr_object_free(*plan_free_result);
+    sr_object_free(plan_free_result);
     sr_object_free(plan_free);
     
     // Starter Plan
@@ -124,11 +161,11 @@ int main(void) {
     sr_object_insert_int(&plan_starter, "storage_gb", 25);
     sr_object_insert_str(&plan_starter, "support_level", "email");
     
-    sr_object_t* plan_starter_result = NULL;
+    sr_object_t plan_starter_result;
     result = sr_create(db, &err, &plan_starter_result, "plan:starter", &plan_starter);
     CHECK_ERROR(result, err, "Failed to create starter plan");
     printf("  [OK] Created plan: Starter ($29/mo, 10 users, 25GB storage)\n");
-    if (plan_starter_result) sr_object_free(*plan_starter_result);
+    sr_object_free(plan_starter_result);
     sr_object_free(plan_starter);
     
     // Pro Plan
@@ -140,11 +177,11 @@ int main(void) {
     sr_object_insert_int(&plan_pro, "storage_gb", 100);
     sr_object_insert_str(&plan_pro, "support_level", "priority");
     
-    sr_object_t* plan_pro_result = NULL;
+    sr_object_t plan_pro_result;
     result = sr_create(db, &err, &plan_pro_result, "plan:pro", &plan_pro);
     CHECK_ERROR(result, err, "Failed to create pro plan");
     printf("  [OK] Created plan: Pro ($99/mo, 50 users, 100GB storage)\n");
-    if (plan_pro_result) sr_object_free(*plan_pro_result);
+    sr_object_free(plan_pro_result);
     sr_object_free(plan_pro);
     
     // Enterprise Plan
@@ -156,11 +193,11 @@ int main(void) {
     sr_object_insert_int(&plan_enterprise, "storage_gb", 1000);
     sr_object_insert_str(&plan_enterprise, "support_level", "dedicated");
     
-    sr_object_t* plan_enterprise_result = NULL;
+    sr_object_t plan_enterprise_result;
     result = sr_create(db, &err, &plan_enterprise_result, "plan:enterprise", &plan_enterprise);
     CHECK_ERROR(result, err, "Failed to create enterprise plan");
     printf("  [OK] Created plan: Enterprise ($499/mo, unlimited users, 1TB storage)\n");
-    if (plan_enterprise_result) sr_object_free(*plan_enterprise_result);
+    sr_object_free(plan_enterprise_result);
     sr_object_free(plan_enterprise);
 
     // ========================================================================
@@ -185,11 +222,11 @@ int main(void) {
         sr_object_insert_str(&feature, "description", features[i][2]);
         sr_object_insert_str(&feature, "min_plan", features[i][3]);
         
-        sr_object_t* feature_result = NULL;
+        sr_object_t feature_result;
         result = sr_create(db, &err, &feature_result, features[i][0], &feature);
         CHECK_ERROR(result, err, "Failed to create feature");
         printf("  [OK] Created feature: %s (requires %s plan)\n", features[i][1], features[i][3]);
-        if (feature_result) sr_object_free(*feature_result);
+        sr_object_free(feature_result);
         sr_object_free(feature);
     }
 
@@ -207,11 +244,11 @@ int main(void) {
     sr_object_insert_str(&org1, "created_at", "2024-01-15T10:00:00Z");
     sr_object_insert_str(&org1, "status", "active");
     
-    sr_object_t* org1_result = NULL;
+    sr_object_t org1_result;
     result = sr_create(db, &err, &org1_result, "organization:techstartup", &org1);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: TechStartup Inc (Technology, USA)\n");
-    if (org1_result) sr_object_free(*org1_result);
+    sr_object_free(org1_result);
     sr_object_free(org1);
     
     // Organization 2: GlobalCorp
@@ -223,11 +260,11 @@ int main(void) {
     sr_object_insert_str(&org2, "created_at", "2023-06-20T14:30:00Z");
     sr_object_insert_str(&org2, "status", "active");
     
-    sr_object_t* org2_result = NULL;
+    sr_object_t org2_result;
     result = sr_create(db, &err, &org2_result, "organization:globalcorp", &org2);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: GlobalCorp (Finance, UK)\n");
-    if (org2_result) sr_object_free(*org2_result);
+    sr_object_free(org2_result);
     sr_object_free(org2);
     
     // Organization 3: LocalBiz
@@ -239,11 +276,11 @@ int main(void) {
     sr_object_insert_str(&org3, "created_at", "2024-03-01T09:15:00Z");
     sr_object_insert_str(&org3, "status", "trial");
     
-    sr_object_t* org3_result = NULL;
+    sr_object_t org3_result;
     result = sr_create(db, &err, &org3_result, "organization:localbiz", &org3);
     CHECK_ERROR(result, err, "Failed to create organization");
     printf("  [OK] Created organization: LocalBiz (Retail, Canada) [TRIAL]\n");
-    if (org3_result) sr_object_free(*org3_result);
+    sr_object_free(org3_result);
     sr_object_free(org3);
 
     // ========================================================================
@@ -278,11 +315,11 @@ int main(void) {
         sr_object_insert_str(&user, "created_at", users[i].created);
         sr_object_insert_str(&user, "status", "active");
         
-        sr_object_t* user_result = NULL;
+        sr_object_t user_result;
         result = sr_create(db, &err, &user_result, users[i].id, &user);
         CHECK_ERROR(result, err, "Failed to create user");
         printf("  [OK] Created user: %s (%s)\n", users[i].name, users[i].email);
-        if (user_result) sr_object_free(*user_result);
+        sr_object_free(user_result);
         sr_object_free(user);
     }
 
@@ -401,9 +438,13 @@ int main(void) {
         sr_object_insert_int(&usage, "value", usage_records[i].value);
         sr_object_insert_str(&usage, "period", usage_records[i].period);
         
-        sr_object_t* usage_result = NULL;
-        result = sr_insert(db, &err, (sr_value_t**)&usage_result, "usage", &usage);
+        /* sr_insert writes an array of values and returns its length -- it is
+           not shaped like sr_create. The cast that used to be here punned an
+           sr_object_t slot into sr_value_t**, and the result was never freed. */
+        sr_value_t* usage_result = NULL;
+        result = sr_insert(db, &err, &usage_result, "usage", &usage);
         CHECK_ERROR(result, err, "Failed to create usage record");
+        if (result > 0 && usage_result) sr_values_free(usage_result, result);
         sr_object_free(usage);
     }
     printf("  [OK] Created 13 usage records (api_calls, storage_mb, active_users)\n");

@@ -22,6 +22,7 @@ surrealdb = { version = "3.2.4", features = [
 ] }
 surrealdb-core = { version = "3.2.4", features = [
     "http",
+    "gql",
 ] }
 tokio = { version = "1.49.0", features = ["full"] }
 uuid = "1.19.0"
@@ -31,6 +32,7 @@ chrono = "0.4.43"
 async-channel = "2.5.0"
 ciborium = "0.2.2"
 arc-swap = "1.8.0"
+serde_json = "1.0.145"
 serde = { version = "1.0.228", features = ["serde_derive"] }
 geo-types = "0.7.18"
 rust_decimal = "1.36"

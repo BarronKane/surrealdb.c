@@ -13,7 +13,7 @@ use surrealdb_core::rpc::{Method, RpcProtocol, DbResult};
 use surrealdb::types::{Value as sdbValue, HashMap, Notification as PublicNotification};
 use tokio::{runtime::Runtime, sync::RwLock};
 
-use crate::{array::MakeArray, opts::Options, stream::RpcStream, string::string_t, SR_ERROR, SR_FATAL};
+use crate::{array::{ArrayGen, MakeArray}, opts::Options, stream::RpcStream, string::string_t, uuid::Uuid, write_error, SR_ERROR, SR_FATAL};
 
 /// The object representing a Surreal RPC connection
 ///
@@ -61,6 +61,21 @@ impl SurrealRpc {
 
             let mut builder = Builder::new().with_notify(notify_tx);
 
+            // Capabilities are a sandbox, so the builder is only touched when
+            // the caller actually asked for something. A parse failure is an
+            // error rather than a silent skip: dropping a name would change the
+            // sandbox without telling anyone.
+            //
+            // Experimental features are gated twice -- by a Cargo feature at
+            // compile time and by the capability here. With only the feature
+            // you get "Experimental capability `gql` is not enabled" at the
+            // point of use, which is a confusing place to find out.
+            match options.capabilities.to_capabilities() {
+                Ok(Some(caps)) => builder = builder.with_capabilities(caps),
+                Ok(None) => {}
+                Err(e) => return Err(string_t::from(e)),
+            }
+
             if options.query_timeout != 0 {
                 builder = builder
                     .with_query_timeout(Some(Duration::from_secs(options.query_timeout as u64)))
@@ -91,6 +106,7 @@ impl SurrealRpc {
                 session_map,
                 notify_rx,
                 default_session: default_session_id,
+                session_dir: options.session_dir_path(),
             };
 
             Ok(SurrealRpc {
@@ -157,41 +173,210 @@ impl SurrealRpc {
             return SR_ERROR;
         }
         with_async(self, err_ptr, |ctx| async {
-            let in_bytes = slice_from_raw_parts(ptr, len as usize);
-            let in_bytes = unsafe { &*in_bytes };
+            let inner = ctx.inner.read().await;
+            let session = inner.default_session;
+            run_rpc(&*inner, session, res_ptr, ptr, len).await
+        })
+    }
 
-            let in_value: ciborium::Value = ciborium::from_reader(in_bytes.as_ref())
-                .map_err(|e| string_t::from(format!("CBOR decode error: {e}")))?;
+    // ------------------------------------------------------------------
+    // Sessions
+    // ------------------------------------------------------------------
+    //
+    // SurrealDB 3.1 removed the type-level "default session": every request
+    // names a session explicitly (GHSA-4vgr-h27g-cf9p). This context mints one
+    // at construction so the simple `sr_surreal_rpc_execute` path keeps
+    // working, and the functions below expose the rest of the model.
+    //
+    // A session id is a plain `sr_uuid_t` and carries no ownership -- sessions
+    // live in the context and are released by `sr_rpc_session_detach` or by
+    // disconnecting the context.
 
-            let (method_str, params) = parse_cbor_request(&in_value)?;
-            let method = Method::parse_case_insensitive(&method_str);
+    /// Register a new session.
+    ///
+    /// Pass an all-zero `session_id` to have one generated and written back;
+    /// otherwise the supplied id is used. Attaching an id that already exists
+    /// is an error.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    #[export_name = "sr_rpc_session_attach"]
+    pub extern "C" fn session_attach(
+        &self,
+        err_ptr: *mut string_t,
+        session_id: *mut Uuid,
+    ) -> c_int {
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        with_async(self, err_ptr, |ctx| async {
+            let requested = unsafe { (*session_id).clone() };
+            let id = if requested.0 == [0u8; 16] {
+                uuid::Uuid::new_v4()
+            } else {
+                uuid::Uuid::from(requested)
+            };
 
-            let inner = &ctx.inner.read().await;
-            // (txn, session, client_session, method, params) — `session` became a
-            // required `Uuid` in 3.1; requests can no longer run unbound.
-            let res = <SurrealRpcInner as RpcProtocol>::execute(
-                &*inner,
-                None,
-                inner.default_session,
-                None,
-                method,
-                params,
-            ).await.map_err(|e| string_t::from(e.to_string()))?;
-            
-            match res {
-                DbResult::Other(v) => {
-                    let cbor_val = value_to_cbor(&v);
-                    let mut out_bytes = Vec::new();
-                    ciborium::into_writer(&cbor_val, &mut out_bytes)
-                        .map_err(|e| string_t::from(format!("CBOR encode error: {e}")))?;
-                    let out = out_bytes.make_array();
-                    unsafe { res_ptr.write(out.ptr) }
-                    Ok(out.len)
-                }
-                _ => {
-                    Err(string_t::from("C SDK: RPC::execute had unimplemented response."))
-                }
-            }
+            let inner = ctx.inner.read().await;
+            <SurrealRpcInner as RpcProtocol>::attach(&*inner, id)
+                .await
+                .map_err(|e| string_t::from(e.to_string()))?;
+
+            unsafe { session_id.write(Uuid::from(id)) };
+            Ok(1)
+        })
+    }
+
+    /// Close a session, cancelling the live queries and transactions it owns.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    #[export_name = "sr_rpc_session_detach"]
+    pub extern "C" fn session_detach(
+        &self,
+        err_ptr: *mut string_t,
+        session_id: *const Uuid,
+    ) -> c_int {
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        with_async(self, err_ptr, |ctx| async {
+            let id = uuid::Uuid::from(unsafe { (*session_id).clone() });
+            let inner = ctx.inner.read().await;
+            <SurrealRpcInner as RpcProtocol>::detach(&*inner, id)
+                .await
+                .map_err(|e| string_t::from(e.to_string()))?;
+            Ok(0)
+        })
+    }
+
+    /// Return a session to its initial state without closing it.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    #[export_name = "sr_rpc_session_reset"]
+    pub extern "C" fn session_reset(
+        &self,
+        err_ptr: *mut string_t,
+        session_id: *const Uuid,
+    ) -> c_int {
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        with_async(self, err_ptr, |ctx| async {
+            let id = uuid::Uuid::from(unsafe { (*session_id).clone() });
+            let inner = ctx.inner.read().await;
+            <SurrealRpcInner as RpcProtocol>::reset(&*inner, id)
+                .await
+                .map_err(|e| string_t::from(e.to_string()))?;
+            Ok(0)
+        })
+    }
+
+    /// List the ids of every active session.
+    ///
+    /// Returns the count, and writes an array of that many uuids to
+    /// `sessions_ptr`. Free it with `sr_uuid_arr_free`.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `sessions_ptr` must be a valid pointer to receive the array
+    #[export_name = "sr_rpc_session_list"]
+    pub extern "C" fn session_list(
+        &self,
+        err_ptr: *mut string_t,
+        sessions_ptr: *mut *mut Uuid,
+    ) -> c_int {
+        if sessions_ptr.is_null() {
+            write_error(err_ptr, "sessions_ptr is null");
+            return SR_ERROR;
+        }
+        with_async(self, err_ptr, |ctx| async {
+            let inner = ctx.inner.read().await;
+            let ids: Vec<Uuid> = inner
+                .session_map
+                .to_vec()
+                .into_iter()
+                .map(|(id, _)| Uuid::from(id))
+                .collect();
+            let out = ids.make_array();
+            unsafe { sessions_ptr.write(out.ptr) };
+            Ok(out.len)
+        })
+    }
+
+    /// The id of the session this context created for itself, which
+    /// `sr_surreal_rpc_execute` runs against.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `session_id` must be a valid pointer to receive a 16-byte uuid
+    #[export_name = "sr_rpc_session_default"]
+    pub extern "C" fn session_default(
+        &self,
+        err_ptr: *mut string_t,
+        session_id: *mut Uuid,
+    ) -> c_int {
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        with_async(self, err_ptr, |ctx| async {
+            let inner = ctx.inner.read().await;
+            unsafe { session_id.write(Uuid::from(inner.default_session)) };
+            Ok(0)
+        })
+    }
+
+    /// Execute an RPC request against a named session.
+    ///
+    /// Identical to `sr_surreal_rpc_execute` except that the session is chosen
+    /// by the caller rather than defaulting to this context's own.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `res_ptr` must be a valid pointer to receive the result
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    /// - `ptr` must be a valid pointer to `len` bytes of CBOR request data
+    ///
+    /// Free the result with sr_byte_arr_free
+    #[export_name = "sr_rpc_execute_on"]
+    pub extern "C" fn execute_on(
+        &self,
+        err_ptr: *mut string_t,
+        res_ptr: *mut *mut u8,
+        session_id: *const Uuid,
+        ptr: *const u8,
+        len: c_int,
+    ) -> c_int {
+        if res_ptr.is_null() {
+            write_error(err_ptr, "res_ptr is null");
+            return SR_ERROR;
+        }
+        if ptr.is_null() {
+            write_error(err_ptr, "ptr is null");
+            return SR_ERROR;
+        }
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        let session = uuid::Uuid::from(unsafe { (*session_id).clone() });
+        with_async(self, err_ptr, move |ctx| async move {
+            let inner = ctx.inner.read().await;
+            run_rpc(&*inner, session, res_ptr, ptr, len).await
         })
     }
 
@@ -331,8 +516,13 @@ where
     C: FnOnce(&'a SurrealRpc) -> F + 'b,
     F: std::future::Future<Output = Result<c_int, string_t>>,
 {
+    // Same three corrections as the non-RPC path in lib.rs: report a poisoned
+    // handle instead of aborting the host process, actually raise the poison
+    // flag, and route every error through write_error so a null err_ptr --
+    // which the header documents as legal -- does not segfault.
     if ctx.ps.load(Ordering::Acquire) {
-        std::process::abort()
+        write_error(err_ptr, "rpc context is poisoned: an earlier operation returned SR_FATAL");
+        return SR_FATAL;
     }
     let _guard = ctx.rt.enter();
 
@@ -340,11 +530,11 @@ where
         Ok(r) => r,
         Err(e) => {
             if let Some(e_str) = e.downcast_ref::<&str>() {
-                let e_string: string_t = format!("Panicked with: {e_str}").into();
-                unsafe { err_ptr.write(e_string) }
+                write_error(err_ptr, format!("Panicked with: {e_str}"));
             } else {
-                unsafe { err_ptr.write("Panicked".into()) }
+                write_error(err_ptr, "Panicked");
             }
+            ctx.ps.store(true, Ordering::Release);
             return SR_FATAL;
         }
     };
@@ -352,15 +542,82 @@ where
     match res {
         Ok(n) => n,
         Err(e) => {
-            unsafe { err_ptr.write(e) }
+            write_error(err_ptr, e);
             SR_ERROR
         }
     }
 }
 
+/// Decode a CBOR request, run it against `session`, and encode the reply.
+///
+/// Shared by `sr_surreal_rpc_execute` (which passes the context's own session)
+/// and `sr_rpc_execute_on` (which passes a caller-chosen one). Since 3.1 the
+/// session is a required argument -- requests cannot run unbound -- so the only
+/// difference between the two entry points is where that uuid comes from.
+async fn run_rpc(
+    inner: &SurrealRpcInner,
+    session: uuid::Uuid,
+    res_ptr: *mut *mut u8,
+    ptr: *const u8,
+    len: c_int,
+) -> Result<c_int, string_t> {
+    let in_bytes = slice_from_raw_parts(ptr, len as usize);
+    let in_bytes = unsafe { &*in_bytes };
+
+    let in_value: ciborium::Value = ciborium::from_reader(in_bytes.as_ref())
+        .map_err(|e| string_t::from(format!("CBOR decode error: {e}")))?;
+
+    let (method_str, params) = parse_cbor_request(&in_value)?;
+    let method = Method::parse_case_insensitive(&method_str);
+
+    // (txn, session, client_session, method, params)
+    //
+    // `client_session` is not a duplicate of `session`: it marks the request as
+    // belonging to a *named* session, and the trait persists only those -- a
+    // per-request ephemeral is deliberately never written to durable storage.
+    // Every session reachable from C is named (the caller's, or the one this
+    // context minted for itself and keeps for its lifetime), so it is passed
+    // whenever persistence is on. With no session directory the whole branch
+    // is inert and this costs nothing.
+    let client_session = inner.persist_sessions_enabled().then_some(session);
+
+    let res = <SurrealRpcInner as RpcProtocol>::execute(
+        inner,
+        None,
+        session,
+        client_session,
+        method,
+        params,
+    )
+    .await
+    .map_err(|e| string_t::from(e.to_string()))?;
+
+    match res {
+        DbResult::Other(v) => {
+            let cbor_val = value_to_cbor(&v);
+            let mut out_bytes = Vec::new();
+            ciborium::into_writer(&cbor_val, &mut out_bytes)
+                .map_err(|e| string_t::from(format!("CBOR encode error: {e}")))?;
+            let out = out_bytes.make_array();
+            unsafe { res_ptr.write(out.ptr) }
+            Ok(out.len)
+        }
+        _ => Err(string_t::from("C SDK: RPC::execute had unimplemented response.")),
+    }
+}
+
+/// Free the uuid array returned by `sr_rpc_session_list`.
+#[export_name = "sr_uuid_arr_free"]
+pub extern "C" fn uuid_arr_free(ptr: *mut Uuid, len: c_int) {
+    ArrayGen { ptr, len }.free()
+}
+
 #[allow(dead_code)]
 struct SurrealRpcInner {
     kvs: Arc<Datastore>,
+    /// Where attached sessions are persisted, or `None` when persistence is
+    /// off. See the RpcProtocol impl below.
+    session_dir: Option<std::path::PathBuf>,
     session_map: HashMap<uuid::Uuid, Arc<RwLock<Session>>>,
     /// Receiving half of the live-query notification channel handed to the
     /// datastore at construction. Cloned out by `sr_surreal_rpc_notifications`.
@@ -403,4 +660,81 @@ impl RpcProtocol for SurrealRpcInner {
     async fn cleanup_lqs(&self, _session_id: &uuid::Uuid) {}
 
     async fn cleanup_all_lqs(&self) {}
+
+    // ----------------------------------------------------------------------
+    // Session persistence
+    // ----------------------------------------------------------------------
+    //
+    // New in SurrealDB 3.2. Upstream added it for edge deployments, where an
+    // idle isolate is evicted between requests and an attached session has to
+    // be rehydrated on the next one. An embedded library has no such
+    // lifecycle, but the same machinery lets a session outlive the RPC context
+    // that created it -- reopen the context against the same directory and an
+    // attached session is still there.
+    //
+    // Sessions are stored as one JSON file per id. The const is true so the
+    // durability branches compile in; `persist_sessions_enabled` is the
+    // runtime switch, and returns false unless the caller supplied a
+    // directory, which is exactly the "operator configuration" shape the trait
+    // documents.
+
+    const PERSIST_SESSIONS: bool = true;
+
+    fn persist_sessions_enabled(&self) -> bool {
+        self.session_dir.is_some()
+    }
+
+    async fn load_session(&self, id: &uuid::Uuid) -> Option<Session> {
+        let path = self.session_path(id)?;
+        let bytes = std::fs::read(path).ok()?;
+        // A file written by an incompatible version is treated as absent
+        // rather than fatal: the session is simply not resumable.
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    async fn persist_session(&self, id: &uuid::Uuid, session: &Session) {
+        let Some(path) = self.session_path(id) else {
+            return;
+        };
+        let Ok(bytes) = serde_json::to_vec(session) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Written via a temporary file and renamed, so a crash mid-write
+        // cannot leave a half-session that load_session would then reject.
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    async fn forget_session(&self, id: &uuid::Uuid) -> Result<(), surrealdb::types::Error> {
+        let Some(path) = self.session_path(id) else {
+            return Ok(());
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            // Already gone is success: del_session removes the durable copy
+            // first and aborts on failure, so reporting an error here would
+            // strand a session that is in fact already forgotten.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(surrealdb::types::Error::internal(format!(
+                "could not forget session {id}: {e}"
+            ))),
+        }
+    }
+}
+
+impl SurrealRpcInner {
+    /// Path of the file backing one session, or `None` when persistence is off.
+    ///
+    /// The uuid is rendered by `Uuid::to_string`, which is hyphenated hex and
+    /// therefore always a safe file name -- a session id never reaches the
+    /// filesystem as caller-controlled text.
+    fn session_path(&self, id: &uuid::Uuid) -> Option<std::path::PathBuf> {
+        let dir = self.session_dir.as_ref()?;
+        Some(dir.join(format!("{id}.session.json")))
+    }
 }

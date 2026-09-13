@@ -109,9 +109,29 @@ TEST(Query, Kill) {
     sr_stream_kill(stream);
 }
 
+TEST(Query, NullErrPtrIsHonoured) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    /* Every function routed through with_surreal_async documents err_ptr as
+       "a valid pointer or null" -- 27 of them say so. The failure branch used
+       to write through it unconditionally, so passing null worked right up
+       until something actually went wrong and then segfaulted. The success
+       path was always fine, which is why nothing caught it.
+
+       Both paths are exercised here; the test failing is a crash, not an
+       assertion. */
+    sr_use_ns(db, NULL, "null_err_ns");
+
+    sr_arr_res_t *res = NULL;
+    int rc = sr_query(db, NULL, &res, "NOT VALID SURQL !!", NULL);
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE(0, rc, "a bad query must report failure");
+    if (rc > 0 && res) sr_arr_res_arr_free(res, rc);
+}
+
 TEST_GROUP_RUNNER(Query) {
     RUN_TEST_CASE(Query, Query);
     RUN_TEST_CASE(Query, SelectLive);
     RUN_TEST_CASE(Query, Run);
     RUN_TEST_CASE(Query, Kill);
+    RUN_TEST_CASE(Query, NullErrPtrIsHonoured);
 }

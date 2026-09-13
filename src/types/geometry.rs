@@ -80,9 +80,24 @@ impl From<LineString<f64>> for sr_g_linestring {
     }
 }
 
-impl From<sr_g_linestring> for LineString<f64> {
-    fn from(l: sr_g_linestring) -> Self {
+impl From<&sr_g_linestring> for LineString<f64> {
+    fn from(l: &sr_g_linestring) -> Self {
         LineString::new(l.0.as_slice().iter().map(|c| Coord::from(c)).collect())
+    }
+}
+
+impl From<sr_g_linestring> for LineString<f64> {
+    /// Borrows and then lets `l` drop, rather than moving its array out. Moving
+    /// a field out of a type with a destructor is E0509, and there is nothing
+    /// here worth moving: the conversion only reads coordinates.
+    fn from(l: sr_g_linestring) -> Self {
+        LineString::from(&l)
+    }
+}
+
+impl Drop for sr_g_linestring {
+    fn drop(&mut self) {
+        self.0.free();
     }
 }
 
@@ -101,12 +116,30 @@ impl From<Polygon<f64>> for sr_g_polygon {
     }
 }
 
+impl From<&sr_g_polygon> for Polygon<f64> {
+    fn from(p: &sr_g_polygon) -> Self {
+        Polygon::new(
+            LineString::from(&p.0),
+            // Previously `.cloned()`, which deep-copied every interior ring
+            // only to convert and discard it -- and, with no destructor on
+            // these types, leaked each copy. Borrowing avoids both.
+            p.1.as_slice().iter().map(LineString::from).collect(),
+        )
+    }
+}
+
 impl From<sr_g_polygon> for Polygon<f64> {
     fn from(p: sr_g_polygon) -> Self {
-        Polygon::new(
-            p.0.into(),
-            p.1.as_slice().iter().cloned().map(|l| l.into()).collect(),
-        )
+        Polygon::from(&p)
+    }
+}
+
+impl Drop for sr_g_polygon {
+    /// Frees the interior rings. The exterior ring is field 0 and is released
+    /// by its own destructor once this returns; freeing the ArrayGen drops the
+    /// boxed slice, which runs each interior ring's destructor in turn.
+    fn drop(&mut self) {
+        self.1.free();
     }
 }
 
@@ -121,9 +154,28 @@ impl From<MultiPoint<f64>> for sr_g_multipoint {
     }
 }
 
+impl From<&sr_g_multipoint> for MultiPoint<f64> {
+    fn from(m: &sr_g_multipoint) -> Self {
+        MultiPoint::from(
+            m.0.as_slice()
+                .iter()
+                .map(|p| Point::new(p.0.x, p.0.y))
+                .collect::<Vec<Point<f64>>>(),
+        )
+    }
+}
+
 impl From<sr_g_multipoint> for MultiPoint<f64> {
     fn from(m: sr_g_multipoint) -> Self {
-        MultiPoint::from(m.0.as_slice().iter().cloned().map(|p| p.into()).collect::<Vec<Point<f64>>>())
+        MultiPoint::from(&m)
+    }
+}
+
+impl Drop for sr_g_multipoint {
+    /// Points carry an inline coordinate and own nothing, so releasing the
+    /// array itself is the whole job.
+    fn drop(&mut self) {
+        self.0.free();
     }
 }
 
@@ -138,9 +190,21 @@ impl From<MultiLineString<f64>> for sr_g_multilinestring {
     }
 }
 
+impl From<&sr_g_multilinestring> for MultiLineString<f64> {
+    fn from(m: &sr_g_multilinestring) -> Self {
+        MultiLineString::new(m.0.as_slice().iter().map(LineString::from).collect())
+    }
+}
+
 impl From<sr_g_multilinestring> for MultiLineString<f64> {
     fn from(m: sr_g_multilinestring) -> Self {
-        MultiLineString::new(m.0.as_slice().iter().cloned().map(|l| l.into()).collect())
+        MultiLineString::from(&m)
+    }
+}
+
+impl Drop for sr_g_multilinestring {
+    fn drop(&mut self) {
+        self.0.free();
     }
 }
 
@@ -155,9 +219,21 @@ impl From<MultiPolygon<f64>> for sr_g_multipolygon {
     }
 }
 
+impl From<&sr_g_multipolygon> for MultiPolygon<f64> {
+    fn from(m: &sr_g_multipolygon) -> Self {
+        MultiPolygon::new(m.0.as_slice().iter().map(Polygon::from).collect())
+    }
+}
+
 impl From<sr_g_multipolygon> for MultiPolygon<f64> {
     fn from(m: sr_g_multipolygon) -> Self {
-        MultiPolygon::new(m.0.as_slice().iter().cloned().map(|p| p.into()).collect())
+        MultiPolygon::from(&m)
+    }
+}
+
+impl Drop for sr_g_multipolygon {
+    fn drop(&mut self) {
+        self.0.free();
     }
 }
 
@@ -177,19 +253,41 @@ pub enum sr_geometry {
     sr_g_unimplemented,
 }
 
-impl From<sr_geometry> for Geometry {
-    fn from(g: sr_geometry) -> Self {
+impl From<&sr_geometry> for Geometry {
+    fn from(g: &sr_geometry) -> Self {
         match g {
-            sr_geometry::sr_g_point(p) => Geometry::Point(p.into()),
+            sr_geometry::sr_g_point(p) => Geometry::Point(Point::new(p.0.x, p.0.y)),
             sr_geometry::sr_g_linestring(l) => Geometry::Line(l.into()),
             sr_geometry::sr_g_polygon(p) => Geometry::Polygon(p.into()),
             sr_geometry::sr_g_multipoint(m) => Geometry::MultiPoint(m.into()),
             sr_geometry::sr_g_multiline(l) => Geometry::MultiLine(l.into()),
             sr_geometry::sr_g_multipolygon(p) => Geometry::MultiPolygon(p.into()),
-            sr_geometry::sr_g_collection(c) => Geometry::Collection(
-                c.as_slice().iter().cloned().map(|g| Geometry::from(g)).collect()
-            ),
+            // Borrowed rather than `.cloned()`: cloning deep-copied every
+            // nested geometry just to convert and discard it.
+            sr_geometry::sr_g_collection(c) => {
+                Geometry::Collection(c.as_slice().iter().map(Geometry::from).collect())
+            }
             sr_geometry::sr_g_unimplemented => Geometry::Point(Point::new(0.0, 0.0)),
+        }
+    }
+}
+
+impl From<sr_geometry> for Geometry {
+    /// Reads through a borrow so `g` can carry a destructor; it is released on
+    /// return rather than having its payload moved out.
+    fn from(g: sr_geometry) -> Self {
+        Geometry::from(&g)
+    }
+}
+
+impl Drop for sr_geometry {
+    /// Only the collection variant owns anything the enum itself must release:
+    /// every other payload is a struct with its own destructor, which drop glue
+    /// runs. Freeing the array drops each nested geometry in turn, so nested
+    /// collections unwind correctly.
+    fn drop(&mut self) {
+        if let sr_geometry::sr_g_collection(c) = self {
+            c.free();
         }
     }
 }

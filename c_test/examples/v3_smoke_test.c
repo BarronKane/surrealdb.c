@@ -67,7 +67,7 @@ int main(void) {
         sr_object_insert_int(&content, "age", 30);
         sr_object_insert_str(&content, "email", "alice@example.com");
 
-        sr_object_t *result = NULL;
+        sr_object_t result;
         int rc = sr_create(db, &err, &result, "person:alice", &content);
         if (rc < 0) {
             printf("FAIL [create person:alice]: %s\n", err);
@@ -76,7 +76,7 @@ int main(void) {
             failures++;
         } else {
             printf("OK   [create person:alice]\n");
-            if (result) sr_object_free(*result);
+            sr_object_free(result);
         }
         sr_object_free(content);
     }
@@ -88,7 +88,7 @@ int main(void) {
         sr_object_insert_int(&content, "age", 25);
         sr_object_insert_str(&content, "email", "bob@example.com");
 
-        sr_object_t *result = NULL;
+        sr_object_t result;
         int rc = sr_create(db, &err, &result, "person:bob", &content);
         if (rc < 0) {
             printf("FAIL [create person:bob]: %s\n", err);
@@ -97,7 +97,7 @@ int main(void) {
             failures++;
         } else {
             printf("OK   [create person:bob]\n");
-            if (result) sr_object_free(*result);
+            sr_object_free(result);
         }
         sr_object_free(content);
     }

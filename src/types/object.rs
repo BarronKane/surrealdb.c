@@ -79,12 +79,15 @@ impl Object {
     ///
     /// - `obj` must be a valid pointer to an Object
     /// - `key` must be a valid null-terminated UTF-8 string
+    /// Takes an `int64_t`, not a C `int`. SurrealDB numbers are 64-bit and the
+    /// narrower parameter silently truncated anything past 32 bits, with no way
+    /// for a caller to notice.
     #[export_name = "sr_object_insert_int"]
-    pub extern "C" fn insert_int(obj: *mut Object, key: *const c_char, value: c_int) {
+    pub extern "C" fn insert_int(obj: *mut Object, key: *const c_char, value: i64) {
         if obj.is_null() || key.is_null() {
             return;
         }
-        Self::insert(obj, key, &Value::SR_VALUE_NUMBER(Number::from(value)));
+        Self::insert(obj, key, &Value::SR_VALUE_NUMBER(Number::SR_NUMBER_INT(value)));
     }
 
     /// Insert a float value into the object

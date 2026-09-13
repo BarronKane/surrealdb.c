@@ -21,6 +21,44 @@
 SR_VERSION_ENCODE(SR_VERSION_MAJOR, SR_VERSION_MINOR, SR_VERSION_PATCH)
 
 
+/**
+ * A three-state switch.
+ *
+ * Zero means "leave the library default alone", so a zero-initialised
+ * `Options` changes nothing -- which is the only safe reading for a
+ * sandbox.
+ */
+typedef enum sr_toggle_t {
+  /**
+   * Keep SurrealDB's default.
+   */
+  SR_TOGGLE_DEFAULT = 0,
+  SR_TOGGLE_ON = 1,
+  SR_TOGGLE_OFF = 2,
+} sr_toggle_t;
+
+/**
+ * Which members of a capability set are allowed or denied.
+ */
+typedef enum sr_target_mode_t {
+  /**
+   * Keep SurrealDB's default for this set.
+   */
+  SR_TARGET_DEFAULT = 0,
+  /**
+   * Empty set.
+   */
+  SR_TARGET_NONE = 1,
+  /**
+   * Exactly the names listed in `items`.
+   */
+  SR_TARGET_SOME = 2,
+  /**
+   * Everything.
+   */
+  SR_TARGET_ALL = 3,
+} sr_target_mode_t;
+
 typedef enum sr_credentials_scope {
   ROOT,
   NAMESPACE,
@@ -87,6 +125,113 @@ typedef struct sr_surreal_rpc_t sr_surreal_rpc_t;
  * Strings returned by SurrealDB functions must be freed with `sr_string_free`.
  */
 typedef char *sr_string_t;
+
+/**
+ * A capability target set.
+ *
+ * `items` is read only when `mode` is `SR_TARGET_SOME`, and holds `len`
+ * null-terminated strings. The accepted spellings are SurrealDB's own -- for
+ * example `"http::get"` for a function, `"1.2.3.4/8"` or `"example.com:80"`
+ * for a network target, `"select"` for an RPC method, `"gql"` for an
+ * experimental feature. An unrecognised name is reported as an error rather
+ * than ignored, so a typo cannot silently widen or narrow the sandbox.
+ */
+typedef struct sr_targets_t {
+  enum sr_target_mode_t mode;
+  const char *const *items;
+  int len;
+} sr_targets_t;
+
+/**
+ * The capability sandbox.
+ *
+ * Every field defaults to "leave SurrealDB's default alone", so
+ * `CapabilitySet caps = {0};` is a no-op. Where both an allow and a deny
+ * set are given, deny wins -- that is SurrealDB's rule, not this library's.
+ */
+typedef struct sr_capabilities_t {
+  /**
+   * Embedded scripting functions. Off by default.
+   */
+  enum sr_toggle_t scripting;
+  /**
+   * Unauthenticated access. Off by default.
+   */
+  enum sr_toggle_t guest_access;
+  /**
+   * Live query notifications. On by default.
+   */
+  enum sr_toggle_t live_query_notifications;
+  /**
+   * Built-in and custom functions. Allowed by default.
+   */
+  struct sr_targets_t allow_functions;
+  struct sr_targets_t deny_functions;
+  /**
+   * Outbound network access. **Denied by default**; this is the field to set
+   * before anything can reach the network.
+   */
+  struct sr_targets_t allow_network;
+  struct sr_targets_t deny_network;
+  /**
+   * RPC methods. Allowed by default.
+   */
+  struct sr_targets_t allow_rpc_methods;
+  struct sr_targets_t deny_rpc_methods;
+  /**
+   * HTTP routes. Allowed by default.
+   */
+  struct sr_targets_t allow_http_routes;
+  struct sr_targets_t deny_http_routes;
+  /**
+   * Experimental features -- `"gql"`, `"files"`, `"surrealism"`. Denied by
+   * default. `gql` is required by the `gql`/`graphql` RPC methods, and
+   * `files` by `file://` values (`sr_value_file`).
+   */
+  struct sr_targets_t allow_experimental;
+  struct sr_targets_t deny_experimental;
+  /**
+   * Which authentication levels may run arbitrary queries.
+   * Names are `"guest"`, `"record"`, `"system"`.
+   */
+  struct sr_targets_t allow_arbitrary_query;
+  struct sr_targets_t deny_arbitrary_query;
+  /**
+   * Which authentication levels may run `eval`-style queries.
+   */
+  struct sr_targets_t allow_eval_query;
+  struct sr_targets_t deny_eval_query;
+} sr_capabilities_t;
+
+/**
+ * Connection options.
+ *
+ * Zero-initialise and set only what you need: every field's zero value means
+ * "SurrealDB's default".
+ */
+typedef struct sr_option_t {
+  /**
+   * Query timeout in seconds. Zero leaves the default in place.
+   */
+  uint8_t query_timeout;
+  /**
+   * Transaction timeout in seconds. Zero leaves the default in place.
+   */
+  uint8_t transaction_timeout;
+  /**
+   * The capability sandbox.
+   */
+  struct sr_capabilities_t capabilities;
+  /**
+   * Directory in which to persist RPC sessions, or null to disable.
+   *
+   * When set, a session attached to an RPC context is written here as JSON
+   * and is rehydrated on demand, so sessions survive the context being torn
+   * down and rebuilt. Ignored by `sr_connect_with_options`, which has no
+   * session map of its own.
+   */
+  const char *session_dir;
+} sr_option_t;
 
 /**
  * A key-value object type for SurrealDB
@@ -490,26 +635,6 @@ typedef struct sr_credentials_access {
   sr_string_t access;
 } sr_credentials_access;
 
-/**
- * Connection options for SurrealDB
- *
- * Configures various settings for the database connection.
- */
-typedef struct sr_option_t {
-  /**
-   * Enable strict mode for queries
-   */
-  bool strict;
-  /**
-   * Query timeout in seconds
-   */
-  uint8_t query_timeout;
-  /**
-   * Transaction timeout in seconds
-   */
-  uint8_t transaction_timeout;
-} sr_option_t;
-
 typedef struct sr_notification_t {
   struct sr_uuid_t query_id;
   enum sr_action action;
@@ -556,6 +681,27 @@ typedef struct sr_notification_t {
  * ```
  */
 int sr_connect(sr_string_t *err_ptr, struct sr_surreal_t **surreal_ptr, const char *endpoint);
+
+/**
+ * Connect with explicit options.
+ *
+ * `sr_connect` uses the server defaults for everything. This takes the
+ * same `Options` as `sr_surreal_rpc_new`, so query and transaction
+ * timeouts and the capability sandbox can be set on the direct path too.
+ *
+ * `session_dir` is ignored here: sessions belong to an RPC context, and
+ * this path has no session map of its own.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `surreal_ptr` must be a valid pointer to receive the connection
+ * - `endpoint` must be a valid null-terminated UTF-8 string
+ */
+int sr_connect_with_options(sr_string_t *err_ptr,
+                            struct sr_surreal_t **surreal_ptr,
+                            const char *endpoint,
+                            struct sr_option_t options);
 
 /**
  * Disconnect a database connection
@@ -1551,6 +1697,96 @@ int sr_surreal_rpc_execute(const struct sr_surreal_rpc_t *self,
                            int len);
 
 /**
+ * Register a new session.
+ *
+ * Pass an all-zero `session_id` to have one generated and written back;
+ * otherwise the supplied id is used. Attaching an id that already exists
+ * is an error.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ */
+int sr_rpc_session_attach(const struct sr_surreal_rpc_t *self,
+                          sr_string_t *err_ptr,
+                          struct sr_uuid_t *session_id);
+
+/**
+ * Close a session, cancelling the live queries and transactions it owns.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ */
+int sr_rpc_session_detach(const struct sr_surreal_rpc_t *self,
+                          sr_string_t *err_ptr,
+                          const struct sr_uuid_t *session_id);
+
+/**
+ * Return a session to its initial state without closing it.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ */
+int sr_rpc_session_reset(const struct sr_surreal_rpc_t *self,
+                         sr_string_t *err_ptr,
+                         const struct sr_uuid_t *session_id);
+
+/**
+ * List the ids of every active session.
+ *
+ * Returns the count, and writes an array of that many uuids to
+ * `sessions_ptr`. Free it with `sr_uuid_arr_free`.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `sessions_ptr` must be a valid pointer to receive the array
+ */
+int sr_rpc_session_list(const struct sr_surreal_rpc_t *self,
+                        sr_string_t *err_ptr,
+                        struct sr_uuid_t **sessions_ptr);
+
+/**
+ * The id of the session this context created for itself, which
+ * `sr_surreal_rpc_execute` runs against.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `session_id` must be a valid pointer to receive a 16-byte uuid
+ */
+int sr_rpc_session_default(const struct sr_surreal_rpc_t *self,
+                           sr_string_t *err_ptr,
+                           struct sr_uuid_t *session_id);
+
+/**
+ * Execute an RPC request against a named session.
+ *
+ * Identical to `sr_surreal_rpc_execute` except that the session is chosen
+ * by the caller rather than defaulting to this context's own.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `res_ptr` must be a valid pointer to receive the result
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ * - `ptr` must be a valid pointer to `len` bytes of CBOR request data
+ *
+ * Free the result with sr_byte_arr_free
+ */
+int sr_rpc_execute_on(const struct sr_surreal_rpc_t *self,
+                      sr_string_t *err_ptr,
+                      uint8_t **res_ptr,
+                      const struct sr_uuid_t *session_id,
+                      const uint8_t *ptr,
+                      int len);
+
+/**
  * Get a stream for receiving live query notifications
  *
  * # Safety
@@ -1578,6 +1814,11 @@ int sr_surreal_rpc_notifications(const struct sr_surreal_rpc_t *self,
  */
 void sr_surreal_rpc_disconnect(struct sr_surreal_rpc_t *ctx);
 
+/**
+ * Free the uuid array returned by `sr_rpc_session_list`.
+ */
+void sr_uuid_arr_free(struct sr_uuid_t *ptr, int len);
+
 void sr_values_free(struct sr_value_t *ptr, int len);
 
 /**
@@ -1597,6 +1838,26 @@ const struct sr_value_t *sr_array_get(const struct sr_array_t *arr, int index);
  * The caller is responsible for freeing the returned array
  */
 struct sr_array_t *sr_array_push(const struct sr_array_t *arr, const struct sr_value_t *value);
+
+/**
+ * Build an array from a contiguous block of values, in one allocation.
+ *
+ * `sr_array_push` cannot mutate -- it returns a *new* array each call, so
+ * appending n elements copies 1 + 2 + ... + n values. Use this instead
+ * whenever the elements are already to hand; it is linear.
+ *
+ * The values are copied, so the caller keeps ownership of the block it
+ * passed in and must still release those values itself. A null pointer or
+ * a non-positive length yields an empty array rather than an error.
+ *
+ * The caller is responsible for freeing the returned array with
+ * `sr_array_free`.
+ *
+ * # Safety
+ *
+ * - `values` must be null, or point to at least `len` initialised Values
+ */
+struct sr_array_t *sr_array_from_values(const struct sr_value_t *values, int len);
 
 /**
  * Free an array created by sr_array_push
@@ -1664,8 +1925,11 @@ void sr_object_insert_str(struct sr_object_t *obj, const char *key, const char *
  *
  * - `obj` must be a valid pointer to an Object
  * - `key` must be a valid null-terminated UTF-8 string
+ * Takes an `int64_t`, not a C `int`. SurrealDB numbers are 64-bit and the
+ * narrower parameter silently truncated anything past 32 bits, with no way
+ * for a caller to notice.
  */
-void sr_object_insert_int(struct sr_object_t *obj, const char *key, int value);
+void sr_object_insert_int(struct sr_object_t *obj, const char *key, int64_t value);
 
 /**
  * Insert a float value into the object

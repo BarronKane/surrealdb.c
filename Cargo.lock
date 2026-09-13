@@ -4334,6 +4334,7 @@ dependencies = [
  "libc",
  "rust_decimal",
  "serde",
+ "serde_json",
  "surrealdb",
  "surrealdb-core",
  "tokio",

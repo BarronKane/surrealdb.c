@@ -44,3 +44,7 @@ exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
 "StringResult" = "string_res_t"
 "SurrealResult" = "surreal_res_t"
 "Options" = "option_t"
+"Toggle" = "toggle_t"
+"TargetMode" = "target_mode_t"
+"TargetSet" = "targets_t"
+"CapabilitySet" = "capabilities_t"

@@ -37,18 +37,19 @@ int main() {
     sr_object_insert_int(&plan, "price_monthly", 99);
     sr_object_insert_int(&plan, "max_users", 50);
     
-    sr_object_t* plan_result = NULL;
+    sr_object_t plan_result = {0};
     int res = sr_create(db, &err, &plan_result, "plan:pro", &plan);
     if (res < 0) {
         printf("  ERROR: %s\n", err);
     } else {
         printf("  sr_create returned %d\n", res);
-        if (plan_result) {
-            printf("  Result: "); 
-            // Print the object somehow - need to convert to value
+        /* The record is written by value, and only when a slot was supplied,
+           which sr_create reports by returning 1. */
+        if (res > 0) {
+            printf("  Result: %d field(s)\n", sr_object_len(&plan_result));
+            sr_object_free(plan_result);
         }
     }
-    if (plan_result) sr_object_free(*plan_result);
     sr_object_free(plan);
     
     // Verify plan exists
@@ -63,14 +64,14 @@ int main() {
     sr_object_insert_str(&org, "industry", "Technology");
     sr_object_insert_str(&org, "status", "active");
     
-    sr_object_t* org_result = NULL;
+    sr_object_t org_result = {0};
     res = sr_create(db, &err, &org_result, "organization:techstartup", &org);
     if (res < 0) {
         printf("  ERROR: %s\n", err);
     } else {
         printf("  sr_create returned %d\n", res);
     }
-    if (org_result) sr_object_free(*org_result);
+    if (res > 0) sr_object_free(org_result);
     sr_object_free(org);
     
     // Verify organization exists
