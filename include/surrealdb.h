@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 3
-#define SR_VERSION_STRING "0.2.3"
+#define SR_VERSION_PATCH 4
+#define SR_VERSION_STRING "0.2.4"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -342,6 +342,14 @@ typedef enum sr_geometry_t_Tag {
   SR_GEOMETRY_MULTIPOINT,
   SR_GEOMETRY_MULTILINE,
   SR_GEOMETRY_MULTIPOLYGON,
+  /**
+   * A heterogeneous collection of geometries.
+   *
+   * This storage is owned by the value and released with Rust's allocator.
+   * Do not assign to the `sr_geometry_collection` union member from C: a
+   * block from `malloc` is freed with the wrong allocator and corrupts the
+   * heap. Build collections with `sr_value_collection`, which copies.
+   */
   SR_GEOMETRY_COLLECTION,
   /**
    * Represents a geometry type added in a newer version of SurrealDB
@@ -2209,6 +2217,31 @@ struct sr_value_t *sr_value_range(struct sr_bound_t start, struct sr_bound_t end
  * - `arr` must be null, or point to a valid Array
  */
 struct sr_value_t *sr_value_array(const struct sr_array_t *arr);
+
+/**
+ * Create a GeometryCollection value from geometry values
+ *
+ * `geoms` is an array of `len` pointers to values made by the other
+ * geometry constructors (`sr_value_point`, `sr_value_polygon`, and so on).
+ * Each is copied, so the caller keeps ownership of the values it passed in
+ * and must still release them with `sr_value_free`. A null pointer or a
+ * non-positive length yields an empty collection.
+ *
+ * Every member must be a geometry value. If any is null or of another
+ * kind the result is SR_VALUE_NONE rather than a malformed collection.
+ *
+ * This is the only supported way to build a collection. Assigning to the
+ * `sr_geometry_collection` union member directly is not: that storage is
+ * released with Rust's allocator, so a block from `malloc` corrupts the
+ * heap when the value is freed.
+ *
+ * Free with sr_value_free
+ *
+ * # Safety
+ *
+ * - `geoms` must be null, or point to at least `len` valid Value pointers
+ */
+struct sr_value_t *sr_value_collection(const struct sr_value_t *const *geoms, int len);
 
 /**
  * Create a Bytes value from raw data

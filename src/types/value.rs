@@ -397,6 +397,59 @@ impl Value {
         Box::into_raw(Box::new(Value::SR_VALUE_ARRAY(Box::new(inner))))
     }
 
+    /// Create a GeometryCollection value from geometry values
+    ///
+    /// `geoms` is an array of `len` pointers to values made by the other
+    /// geometry constructors (`sr_value_point`, `sr_value_polygon`, and so on).
+    /// Each is copied, so the caller keeps ownership of the values it passed in
+    /// and must still release them with `sr_value_free`. A null pointer or a
+    /// non-positive length yields an empty collection.
+    ///
+    /// Every member must be a geometry value. If any is null or of another
+    /// kind the result is SR_VALUE_NONE rather than a malformed collection.
+    ///
+    /// This is the only supported way to build a collection. Assigning to the
+    /// `sr_geometry_collection` union member directly is not: that storage is
+    /// released with Rust's allocator, so a block from `malloc` corrupts the
+    /// heap when the value is freed.
+    ///
+    /// Free with sr_value_free
+    ///
+    /// # Safety
+    ///
+    /// - `geoms` must be null, or point to at least `len` valid Value pointers
+    #[export_name = "sr_value_collection"]
+    pub extern "C" fn value_collection(
+        geoms: *const *const Value,
+        len: std::ffi::c_int,
+    ) -> *mut Value {
+        use crate::array::MakeArray;
+        use crate::geometry::sr_geometry;
+
+        let collection = |members: Vec<sr_geometry>| {
+            Box::into_raw(Box::new(Value::SR_GEOMETRY_OBJECT(
+                sr_geometry::SR_GEOMETRY_COLLECTION(members.make_array()),
+            )))
+        };
+
+        if geoms.is_null() || len <= 0 {
+            return collection(Vec::new());
+        }
+
+        let ptrs = unsafe { std::slice::from_raw_parts(geoms, len as usize) };
+        let mut members: Vec<sr_geometry> = Vec::with_capacity(ptrs.len());
+        for &p in ptrs {
+            if p.is_null() {
+                return Box::into_raw(Box::new(Value::SR_VALUE_NONE));
+            }
+            match unsafe { &*p } {
+                Value::SR_GEOMETRY_OBJECT(g) => members.push(g.clone()),
+                _ => return Box::into_raw(Box::new(Value::SR_VALUE_NONE)),
+            }
+        }
+        collection(members)
+    }
+
     /// Create a Bytes value from raw data
     #[export_name = "sr_value_bytes"]
     pub extern "C" fn value_bytes(data: *const u8, len: std::ffi::c_int) -> *mut Value {

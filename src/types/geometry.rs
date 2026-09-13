@@ -247,6 +247,12 @@ pub enum sr_geometry {
     SR_GEOMETRY_MULTIPOINT(sr_g_multipoint),
     SR_GEOMETRY_MULTILINE(sr_g_multilinestring),
     SR_GEOMETRY_MULTIPOLYGON(sr_g_multipolygon),
+    /// A heterogeneous collection of geometries.
+    ///
+    /// This storage is owned by the value and released with Rust's allocator.
+    /// Do not assign to the `sr_geometry_collection` union member from C: a
+    /// block from `malloc` is freed with the wrong allocator and corrupts the
+    /// heap. Build collections with `sr_value_collection`, which copies.
     SR_GEOMETRY_COLLECTION(ArrayGen<sr_geometry>),
     /// Represents a geometry type added in a newer version of SurrealDB
     /// that this C API version doesn't yet support

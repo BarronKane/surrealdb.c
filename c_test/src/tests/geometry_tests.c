@@ -144,6 +144,118 @@ TEST(Geometry, RepeatedConstructionDoesNotLeak) {
     }
 }
 
+/*
+ * A GeometryCollection must be constructible in C.
+ *
+ * It was the one geometry kind with no constructor: the conversion handled it
+ * in both directions, but a caller could only obtain one by reading it back
+ * from the database. The union member is Rust-allocated, so hand-assembling a
+ * collection from a malloc'd block would corrupt the heap on free -- there was
+ * no safe workaround, only a clunky one (synthesize via query text, rebind).
+ */
+TEST(Geometry, Collection) {
+    sr_value_t *a = sr_value_point(1.0, 2.0);
+    sr_value_t *b = sr_value_linestring(LINE, 3);
+    const sr_value_t *members[2] = { a, b };
+
+    sr_value_t *v = sr_value_collection(members, 2);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_OBJECT, v->tag);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_GEOMETRY_COLLECTION, v->sr_geometry_object.tag,
+                                  "tag should be COLLECTION");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, v->sr_geometry_object.sr_geometry_collection.len,
+                                  "the collection must carry its members");
+
+    /* The members are copied, so releasing ours must not disturb the value. */
+    sr_value_free(a);
+    sr_value_free(b);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, v->sr_geometry_object.sr_geometry_collection.len,
+                                  "the value owns its own copy");
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_POINT,
+                          v->sr_geometry_object.sr_geometry_collection.ptr[0].tag);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_LINESTRING,
+                          v->sr_geometry_object.sr_geometry_collection.ptr[1].tag);
+
+    sr_value_free(v);
+}
+
+TEST(Geometry, CollectionSurvivesTheDatabase) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_value_t *a = sr_value_point(1.0, 2.0);
+    sr_value_t *b = sr_value_point(3.0, 4.0);
+    const sr_value_t *members[2] = { a, b };
+    sr_value_t *v = sr_value_collection(members, 2);
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_set(db, &err, "g", v));
+
+    /* Into a typed field: the whole point is that a constructed collection
+       coerces the same way one read back from the database does. */
+    sr_arr_res_t *ddl = NULL;
+    int n = sr_query(db, &err, &ddl,
+                     "DEFINE TABLE geoc SCHEMAFULL; "
+                     "DEFINE FIELD loc ON geoc TYPE geometry<collection>;", NULL);
+    if (n > 0) sr_arr_res_arr_free(ddl, n);
+    if (err) { sr_string_free(err); err = NULL; }
+
+    sr_arr_res_t *res = NULL;
+    int rc = sr_query(db, &err, &res, "CREATE geoc:1 SET loc = $g RETURN loc;", NULL);
+    if (rc < 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "a constructed collection should store: %s",
+                 err ? (const char *)err : "(no error)");
+        if (err) { sr_string_free(err); err = NULL; }
+        sr_value_free(v); sr_value_free(a); sr_value_free(b);
+        TEST_FAIL_MESSAGE(msg);
+    }
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, rc, "the create should return a row");
+
+    const sr_value_t *row = sr_array_get(&res[0].ok, 0);
+    const sr_value_t *back = NULL;
+    if (row && row->tag == SR_VALUE_OBJECT) {
+        back = sr_object_get(&row->sr_value_object, "loc");
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(back, "the loc field should be present");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_GEOMETRY_OBJECT, back->tag,
+                                  "a collection must not arrive as SR_VALUE_NONE");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_GEOMETRY_COLLECTION, back->sr_geometry_object.tag,
+                                  "it must still be a collection");
+
+    sr_arr_res_arr_free(res, rc);
+    sr_value_free(v);
+    sr_value_free(a);
+    sr_value_free(b);
+}
+
+TEST(Geometry, CollectionRejectsNonGeometryMembers) {
+    /* A null array is an empty collection, like sr_value_array(NULL). */
+    sr_value_t *empty = sr_value_collection(NULL, 0);
+    TEST_ASSERT_NOT_NULL(empty);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_OBJECT, empty->tag);
+    TEST_ASSERT_EQUAL_INT(SR_GEOMETRY_COLLECTION, empty->sr_geometry_object.tag);
+    TEST_ASSERT_EQUAL_INT(0, empty->sr_geometry_object.sr_geometry_collection.len);
+    sr_value_free(empty);
+
+    /* A non-geometry member degrades to NONE rather than a malformed value. */
+    sr_value_t *pt = sr_value_point(1.0, 2.0);
+    sr_value_t *num = sr_value_int(7);
+    const sr_value_t *mixed[2] = { pt, num };
+    sr_value_t *bad = sr_value_collection(mixed, 2);
+    TEST_ASSERT_NOT_NULL(bad);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_NONE, bad->tag,
+                                  "a non-geometry member must be rejected");
+    sr_value_free(bad);
+
+    /* So does a null member. */
+    const sr_value_t *holed[2] = { pt, NULL };
+    sr_value_t *holed_v = sr_value_collection(holed, 2);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_NONE, holed_v->tag);
+    sr_value_free(holed_v);
+
+    sr_value_free(pt);
+    sr_value_free(num);
+}
+
 TEST_GROUP_RUNNER(Geometry) {
     RUN_TEST_CASE(Geometry, Point);
     RUN_TEST_CASE(Geometry, LineString);
@@ -152,4 +264,7 @@ TEST_GROUP_RUNNER(Geometry) {
     RUN_TEST_CASE(Geometry, NullArgumentsAreRejected);
     RUN_TEST_CASE(Geometry, SurvivesTheDatabase);
     RUN_TEST_CASE(Geometry, RepeatedConstructionDoesNotLeak);
+    RUN_TEST_CASE(Geometry, Collection);
+    RUN_TEST_CASE(Geometry, CollectionSurvivesTheDatabase);
+    RUN_TEST_CASE(Geometry, CollectionRejectsNonGeometryMembers);
 }
