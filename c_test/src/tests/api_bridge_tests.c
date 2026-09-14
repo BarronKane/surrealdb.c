@@ -83,7 +83,7 @@ BRIDGE_TEST(set, test_sr_set)
 BRIDGE_TEST(signin, test_sr_signin)
 BRIDGE_TEST(signup, test_sr_signup)
 BRIDGE_TEST(stream_kill, test_sr_stream_kill)
-BRIDGE_TEST(stream_next, test_sr_stream_next)
+BRIDGE_TEST(stream_next_timeout, test_sr_stream_next_timeout)
 BRIDGE_TEST(string_free, test_sr_string_free)
 BRIDGE_TEST(surreal_disconnect, test_sr_surreal_disconnect)
 BRIDGE_TEST(surreal_rpc_execute, test_sr_surreal_rpc_execute)
@@ -166,7 +166,7 @@ TEST_GROUP_RUNNER(LegacyApi)
     RUN_TEST_CASE(LegacyApi, signin);
     RUN_TEST_CASE(LegacyApi, signup);
     RUN_TEST_CASE(LegacyApi, stream_kill);
-    RUN_TEST_CASE(LegacyApi, stream_next);
+    RUN_TEST_CASE(LegacyApi, stream_next_timeout);
     RUN_TEST_CASE(LegacyApi, string_free);
     RUN_TEST_CASE(LegacyApi, surreal_disconnect);
     RUN_TEST_CASE(LegacyApi, surreal_rpc_execute);

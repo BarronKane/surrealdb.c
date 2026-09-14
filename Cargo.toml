@@ -1,11 +1,11 @@
 [package]
 name = "surrealdb_c"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
 description = "The official SurrealDB SDK for C"
 repository = "https://github.com/surrealdb/surrealdb.c"
-license = "Apache License 2.0"
+license = "Apache-2.0"
 
 [workspace]
 members = ["c-tests"]

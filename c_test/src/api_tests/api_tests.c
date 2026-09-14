@@ -1097,7 +1097,7 @@ int test_sr_surreal_rpc_free(void) {
  * Stream Tests
  * ============================================================================ */
 
-int test_sr_stream_next(void) {
+int test_sr_stream_next_timeout(void) {
     /* Tested as part of select_live */
     return API_TEST_SKIP;
 }

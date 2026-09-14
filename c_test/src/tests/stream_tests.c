@@ -150,9 +150,44 @@ TEST(Stream, ExpiredWaitDoesNotDropNotifications) {
     sr_stream_kill(stream);
 }
 
+/*
+ * A negative bound is rejected rather than treated as "wait forever".
+ *
+ * poll(2) reads negative as infinite, and sr_stream_next_timeout deliberately
+ * does not. A killed live query cannot be observed to end on this path (see the
+ * TODO in src/types/stream.rs), so an unbounded wait here has no exit at all --
+ * the reader cannot be woken and cannot be released by another thread. Rather
+ * than leave that reachable and document it as a caveat, asking for it is an
+ * error, and sr_stream_next was removed in 0.3.0 for the same reason.
+ *
+ * This must return immediately. If it ever blocks, the suite hangs, which is
+ * the failure this whole contract exists to prevent.
+ */
+TEST(Stream, NegativeTimeoutIsRejected) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_stream_t *stream = live_on("bounded_stream");
+    if (stream == NULL) {
+        TEST_IGNORE_MESSAGE("live queries unavailable on this build");
+    }
+
+    sr_notification_t notification;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ERROR,
+        sr_stream_next_timeout(stream, &notification, -1),
+        "a negative bound must be rejected, not treated as an infinite wait");
+
+    /* Still usable afterwards: the rejection is not a poisoning. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE,
+        sr_stream_next_timeout(stream, &notification, 0),
+        "the stream should still be readable after a rejected bound");
+
+    sr_stream_kill(stream);
+}
+
 TEST_GROUP_RUNNER(Stream) {
     RUN_TEST_CASE(Stream, Next);
     RUN_TEST_CASE(Stream, NextTimeoutZeroDoesNotBlock);
     RUN_TEST_CASE(Stream, ExpiredWaitDoesNotDropNotifications);
+    RUN_TEST_CASE(Stream, NegativeTimeoutIsRejected);
     RUN_TEST_CASE(Stream, Kill);
 }

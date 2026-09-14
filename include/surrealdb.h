@@ -11,8 +11,8 @@
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 3
-#define SR_VERSION_PATCH 0
-#define SR_VERSION_STRING "0.3.0"
+#define SR_VERSION_PATCH 1
+#define SR_VERSION_STRING "0.3.1"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -92,7 +92,9 @@ typedef struct sr_rpc_stream_t sr_rpc_stream_t;
  * Stream for receiving live query notifications
  *
  * May be sent across threads, but must not be aliased.
- * Use `sr_stream_next` to receive notifications and `sr_stream_kill` to close.
+ * Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
+ * to close. There is deliberately no unbounded read on this type; see the
+ * note on `sr_stream_next_timeout`.
  */
 typedef struct sr_stream_t sr_stream_t;
 
@@ -1127,7 +1129,26 @@ int sr_invalidate(const struct sr_surreal_t *db, sr_string_t *err_ptr);
 /**
  * Kill a live query by its UUID string
  *
- * Terminates an active live query subscription.
+ * Stops the live query in the datastore: no further changes are delivered
+ * for it.
+ *
+ * # This does not end an `sr_stream_t`
+ *
+ * A stream from `sr_select_live` goes quiet but stays open, and no
+ * `SR_CLOSED` ever arrives -- see the TODO on `src/types/stream.rs` for why
+ * (a core bug three layers up, not something this library can work around).
+ * A reader polling that stream cannot tell "nothing happening right now"
+ * from "this query is dead", and will keep waiting on a corpse.
+ *
+ * **To retire a stream, call `sr_stream_kill`.** That does stop the
+ * underlying live query -- by a different route that the defect does not
+ * touch -- and releases the stream in the same step. Reach for `sr_kill`
+ * only for a live query registered some other way, such as a bare
+ * `LIVE SELECT` run through `sr_query`, where no `sr_stream_t` exists to
+ * be stranded.
+ *
+ * Note that `REMOVE TABLE` strands a stream the same way, so this is a
+ * property of the path rather than of this function.
  *
  * # Safety
  *
@@ -1172,10 +1193,16 @@ int sr_kill(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *que
  *     return 1;
  * }
  *
- * sr_notification_t not ;
- * if (sr_stream_next(stream, &not ) > 0)
+ * Every wait is bounded, so a reader always gets control back. Loop on
+ * SR_NONE and check whatever else the thread must stay responsive to.
+ *
+ * sr_notification_t note;
+ * while (running)
  * {
- *     sr_print_notification(&not );
+ *     int got = sr_stream_next_timeout(stream, &note, 250);
+ *     if (got > 0) { sr_print_notification(&note); sr_notification_free(note); }
+ *     else if (got == SR_NONE) continue;   // nothing yet
+ *     else break;                          // SR_CLOSED or an error
  * }
  * sr_stream_kill(stream);
  */
@@ -2057,42 +2084,38 @@ void sr_string_arr_free(char **arr, int len);
 void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
 
 /**
- * Get the next notification, blocking until one arrives
- *
- * Returns 1 and writes to `notification_ptr` when a notification is received,
- * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
- * It never returns SR_NONE: a blocking call has nothing to report until it
- * has something.
- *
- * # Blocking and shutdown
- *
- * This call blocks until a notification is available. It is intended to be
- * driven from a dedicated thread rather than a latency-sensitive one; see
- * `sr_stream_next_timeout` for a bounded or non-blocking wait.
- *
- * A stream borrows the runtime owned by the connection it was opened on, so
- * teardown is ordered: call `sr_stream_kill` first, then
- * `sr_surreal_disconnect`. Disconnecting first drops that runtime out from
- * under the stream, and the kill then runs against a runtime that is already
- * shut down.
- *
- * There is no way to release a reader already parked in this call from another
- * thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
- * this only when an event is expected, and prefer `sr_stream_next_timeout`
- * for a reader that has to be able to give up.
- */
-int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notification_ptr);
-
-/**
  * Get the next notification, waiting no longer than `timeout_ms`
  *
  * Returns 1 and writes to `notification_ptr` when a notification is
  * received, SR_NONE when the wait expired with the stream still open,
- * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
+ * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error or
+ * a negative `timeout_ms`.
  *
- * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
- * `sr_stream_next`, zero polls once and returns immediately, and a positive
- * value waits up to that many milliseconds.
+ * `timeout_ms` is a bound in milliseconds and zero polls once and returns
+ * immediately. Unlike `poll(2)` a negative value is **not** "wait
+ * forever" -- it is rejected with SR_ERROR. See below.
+ *
+ * # There is no unbounded wait on this type, on purpose
+ *
+ * A live query that is killed cannot be observed to end here (see the TODO
+ * on this module). A reader parked with no deadline on such a stream has no
+ * exit: nothing further arrives, SR_CLOSED never comes, and
+ * `sr_stream_kill` frees the very stream that reader is borrowing, so
+ * another thread cannot release it either. The process has to die.
+ *
+ * Rather than document that as a caveat and let callers walk into it, the
+ * unbounded read is not offered: `sr_stream_next` is disabled in 0.3.0 --
+ * commented out in place, not deleted, since it becomes correct again the
+ * moment the upstream fix lands -- and a negative bound is an error rather
+ * than a synonym for it. Every wait on this type therefore terminates.
+ *
+ * A long bound is cheap: the wait is a real timer, not a poll loop, so
+ * `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
+ * would have cost, and still returns.
+ *
+ * `sr_rpc_stream_next` keeps its unbounded form because the RPC path does
+ * not have this defect: freeing the context ends the stream and releases a
+ * parked reader with SR_CLOSED, which is covered by a test.
  *
  * # SR_NONE is not SR_CLOSED
  *
@@ -2108,9 +2131,12 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
  * poll that finds it empty leaves any later arrival in place, so polling in
  * a loop cannot lose an event.
  *
- * This is the call for a reader that must stay responsive to anything other
- * than the stream -- a shutdown flag, usually, since `sr_stream_kill` cannot
- * release a reader already parked inside `sr_stream_next`.
+ * # Teardown
+ *
+ * A stream borrows the runtime owned by the connection it was opened on, so
+ * teardown is ordered: call `sr_stream_kill` first, then
+ * `sr_surreal_disconnect`. `sr_stream_kill` is also the only way to stop the
+ * underlying live query cleanly -- `sr_kill` does not (see its own note).
  */
 int sr_stream_next_timeout(struct sr_stream_t *self,
                            struct sr_notification_t *notification_ptr,

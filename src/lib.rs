@@ -885,7 +885,26 @@ impl Surreal {
 
     /// Kill a live query by its UUID string
     ///
-    /// Terminates an active live query subscription.
+    /// Stops the live query in the datastore: no further changes are delivered
+    /// for it.
+    ///
+    /// # This does not end an `sr_stream_t`
+    ///
+    /// A stream from `sr_select_live` goes quiet but stays open, and no
+    /// `SR_CLOSED` ever arrives -- see the TODO on `src/types/stream.rs` for why
+    /// (a core bug three layers up, not something this library can work around).
+    /// A reader polling that stream cannot tell "nothing happening right now"
+    /// from "this query is dead", and will keep waiting on a corpse.
+    ///
+    /// **To retire a stream, call `sr_stream_kill`.** That does stop the
+    /// underlying live query -- by a different route that the defect does not
+    /// touch -- and releases the stream in the same step. Reach for `sr_kill`
+    /// only for a live query registered some other way, such as a bare
+    /// `LIVE SELECT` run through `sr_query`, where no `sr_stream_t` exists to
+    /// be stranded.
+    ///
+    /// Note that `REMOVE TABLE` strands a stream the same way, so this is a
+    /// property of the path rather than of this function.
     ///
     /// # Safety
     ///
@@ -937,10 +956,16 @@ impl Surreal {
     ///     return 1;
     /// }
     ///
-    /// sr_notification_t not ;
-    /// if (sr_stream_next(stream, &not ) > 0)
+    /// Every wait is bounded, so a reader always gets control back. Loop on
+    /// SR_NONE and check whatever else the thread must stay responsive to.
+    ///
+    /// sr_notification_t note;
+    /// while (running)
     /// {
-    ///     sr_print_notification(&not );
+    ///     int got = sr_stream_next_timeout(stream, &note, 250);
+    ///     if (got > 0) { sr_print_notification(&note); sr_notification_free(note); }
+    ///     else if (got == SR_NONE) continue;   // nothing yet
+    ///     else break;                          // SR_CLOSED or an error
     /// }
     /// sr_stream_kill(stream);
     #[export_name = "sr_select_live"]

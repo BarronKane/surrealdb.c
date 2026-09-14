@@ -1,3 +1,41 @@
+//! Live query notification streams.
+//!
+//! TODO(upstream): a killed live query never ends its stream on the embedded
+//! path, so `SR_CLOSED` is effectively unreachable there.
+//!
+//! The cause is in surrealdb-core, not here, and not in the Rust SDK either.
+//! `KILL` builds its terminal notification with the session id hardcoded to
+//! `None` (surrealdb-core 3.2.4, `src/expr/statements/kill.rs`, the
+//! `PublicNotification::new(lid.into(), None, PublicAction::Killed, ..)` call).
+//! The SDK's local router then drops exactly that shape on the floor before it
+//! can be routed:
+//!
+//! ```text
+//! // surrealdb 3.2.4, src/engine/local/native.rs
+//! let Some(session_id) = notification.session.map(|x| x.into_inner()) else {
+//!     continue                       // <- the Killed notification dies here
+//! };
+//! ```
+//!
+//! Every layer below that is already correct and needs no change:
+//!
+//! - the router forwards all actions to the per-live-query sender, Killed
+//!   included -- it does not filter,
+//! - `Stream<Value>::poll_next` maps `Action::Killed` to `Poll::Ready(None)`,
+//!   i.e. end of stream (surrealdb 3.2.4, `src/method/live.rs`),
+//! - and this module maps that `None` to `SR_CLOSED`.
+//!
+//! So the whole chain works the moment that `None` becomes `Some(session_id)`.
+//! Nothing here can substitute for it: the fix is one field, three layers up.
+//!
+//! `RpcStream` is unaffected because it reads the datastore's broker channel
+//! directly and never passes through the session gate, which is why a KILLED
+//! notification is observable there and nowhere else.
+//!
+//! Until it is fixed: every wait on `Stream` is bounded, so a reader always
+//! gets control back even though it cannot be told the query is dead. See
+//! `sr_stream_next_timeout`.
+
 use std::ffi::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
@@ -28,7 +66,9 @@ fn guard(f: impl FnOnce() -> c_int) -> c_int {
 /// Stream for receiving live query notifications
 ///
 /// May be sent across threads, but must not be aliased.
-/// Use `sr_stream_next` to receive notifications and `sr_stream_kill` to close.
+/// Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
+/// to close. There is deliberately no unbounded read on this type; see the
+/// note on `sr_stream_next_timeout`.
 pub struct Stream {
     inner: sdbStream<sdbValue>,
     rt: Handle,
@@ -41,47 +81,85 @@ impl Stream {
 }
 
 impl Stream {
-    /// Get the next notification, blocking until one arrives
-    ///
-    /// Returns 1 and writes to `notification_ptr` when a notification is received,
-    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
-    /// It never returns SR_NONE: a blocking call has nothing to report until it
-    /// has something.
-    ///
-    /// # Blocking and shutdown
-    ///
-    /// This call blocks until a notification is available. It is intended to be
-    /// driven from a dedicated thread rather than a latency-sensitive one; see
-    /// `sr_stream_next_timeout` for a bounded or non-blocking wait.
-    ///
-    /// A stream borrows the runtime owned by the connection it was opened on, so
-    /// teardown is ordered: call `sr_stream_kill` first, then
-    /// `sr_surreal_disconnect`. Disconnecting first drops that runtime out from
-    /// under the stream, and the kill then runs against a runtime that is already
-    /// shut down.
-    ///
-    /// There is no way to release a reader already parked in this call from another
-    /// thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
-    /// this only when an event is expected, and prefer `sr_stream_next_timeout`
-    /// for a reader that has to be able to give up.
-    #[export_name = "sr_stream_next"]
-    pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
-        guard(|| match self.rt.block_on(self.inner.next()) {
-            Some(Ok(n)) => Self::deliver(n, notification_ptr),
-            Some(Err(_)) => SR_ERROR,
-            None => SR_CLOSED,
-        })
-    }
+    // TODO(upstream): restore `sr_stream_next` once a killed live query ends
+    // its stream on the embedded path -- see the module TODO above for the
+    // one-field fix in core that this waits on.
+    //
+    // Kept verbatim rather than deleted, because there is nothing wrong with
+    // this code: it is correct the moment `SR_CLOSED` becomes reachable. It is
+    // disabled only because an unbounded wait here currently has no exit, and a
+    // blocking read whose only outcome can be "park until the process dies" is
+    // worse than no blocking read at all.
+    //
+    // To bring it back: uncomment, drop the `timeout_ms < 0` rejection in
+    // `next_timeout` below so a negative bound delegates here again, restore the
+    // `sr_stream_next` entry in c_test/src/tests/api_bridge_tests.c, and delete
+    // `TEST(Stream, NegativeTimeoutIsRejected)`.
+    //
+    // /// Get the next notification, blocking until one arrives
+    // ///
+    // /// Returns 1 and writes to `notification_ptr` when a notification is received,
+    // /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
+    // /// It never returns SR_NONE: a blocking call has nothing to report until it
+    // /// has something.
+    // ///
+    // /// # Blocking and shutdown
+    // ///
+    // /// This call blocks until a notification is available. It is intended to be
+    // /// driven from a dedicated thread rather than a latency-sensitive one; see
+    // /// `sr_stream_next_timeout` for a bounded or non-blocking wait.
+    // ///
+    // /// A stream borrows the runtime owned by the connection it was opened on, so
+    // /// teardown is ordered: call `sr_stream_kill` first, then
+    // /// `sr_surreal_disconnect`. Disconnecting first drops that runtime out from
+    // /// under the stream, and the kill then runs against a runtime that is already
+    // /// shut down.
+    // ///
+    // /// There is no way to release a reader already parked in this call from another
+    // /// thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
+    // /// this only when an event is expected, and prefer `sr_stream_next_timeout`
+    // /// for a reader that has to be able to give up.
+    // #[export_name = "sr_stream_next"]
+    // pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
+    //     guard(|| match self.rt.block_on(self.inner.next()) {
+    //         Some(Ok(n)) => Self::deliver(n, notification_ptr),
+    //         Some(Err(_)) => SR_ERROR,
+    //         None => SR_CLOSED,
+    //     })
+    // }
 
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is
     /// received, SR_NONE when the wait expired with the stream still open,
-    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
+    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error or
+    /// a negative `timeout_ms`.
     ///
-    /// `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
-    /// `sr_stream_next`, zero polls once and returns immediately, and a positive
-    /// value waits up to that many milliseconds.
+    /// `timeout_ms` is a bound in milliseconds and zero polls once and returns
+    /// immediately. Unlike `poll(2)` a negative value is **not** "wait
+    /// forever" -- it is rejected with SR_ERROR. See below.
+    ///
+    /// # There is no unbounded wait on this type, on purpose
+    ///
+    /// A live query that is killed cannot be observed to end here (see the TODO
+    /// on this module). A reader parked with no deadline on such a stream has no
+    /// exit: nothing further arrives, SR_CLOSED never comes, and
+    /// `sr_stream_kill` frees the very stream that reader is borrowing, so
+    /// another thread cannot release it either. The process has to die.
+    ///
+    /// Rather than document that as a caveat and let callers walk into it, the
+    /// unbounded read is not offered: `sr_stream_next` is disabled in 0.3.0 --
+    /// commented out in place, not deleted, since it becomes correct again the
+    /// moment the upstream fix lands -- and a negative bound is an error rather
+    /// than a synonym for it. Every wait on this type therefore terminates.
+    ///
+    /// A long bound is cheap: the wait is a real timer, not a poll loop, so
+    /// `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
+    /// would have cost, and still returns.
+    ///
+    /// `sr_rpc_stream_next` keeps its unbounded form because the RPC path does
+    /// not have this defect: freeing the context ends the stream and releases a
+    /// parked reader with SR_CLOSED, which is covered by a test.
     ///
     /// # SR_NONE is not SR_CLOSED
     ///
@@ -97,9 +175,12 @@ impl Stream {
     /// poll that finds it empty leaves any later arrival in place, so polling in
     /// a loop cannot lose an event.
     ///
-    /// This is the call for a reader that must stay responsive to anything other
-    /// than the stream -- a shutdown flag, usually, since `sr_stream_kill` cannot
-    /// release a reader already parked inside `sr_stream_next`.
+    /// # Teardown
+    ///
+    /// A stream borrows the runtime owned by the connection it was opened on, so
+    /// teardown is ordered: call `sr_stream_kill` first, then
+    /// `sr_surreal_disconnect`. `sr_stream_kill` is also the only way to stop the
+    /// underlying live query cleanly -- `sr_kill` does not (see its own note).
     #[export_name = "sr_stream_next_timeout"]
     pub extern "C" fn next_timeout(
         &mut self,
@@ -107,7 +188,9 @@ impl Stream {
         timeout_ms: c_int,
     ) -> c_int {
         if timeout_ms < 0 {
-            return self.next(notification_ptr);
+            // Not "wait forever": that state is unrecoverable on this path, so
+            // asking for it is a caller error rather than a supported mode.
+            return SR_ERROR;
         }
         // Cloned so the future below can borrow `inner` mutably without also
         // holding a borrow of `rt`.
@@ -130,7 +213,7 @@ impl Stream {
         })
     }
 
-    /// Hand one notification to C. Shared by both `next` variants.
+    /// Hand one notification to C.
     fn deliver(
         n: surrealdb::Notification<sdbValue>,
         notification_ptr: *mut Notification,
