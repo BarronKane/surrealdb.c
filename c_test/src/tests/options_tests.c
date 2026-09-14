@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
 TEST_GROUP(Options);
 
@@ -211,6 +215,43 @@ TEST(Options, SessionsPersistAcrossContexts) {
                                       "a session file should have been written");
     }
     (void)probe;
+
+#ifndef _WIN32
+    /*
+     * A session file is the whole session serialised, which includes its
+     * authentication token and record auth data. At a default umask
+     * std::fs::write would leave it 0644 -- readable by every account on the
+     * machine -- so the library sets 0600 on the file and 0700 on the
+     * directory. Assert it, because nothing else would notice a regression.
+     */
+    {
+        DIR *d = opendir(dir);
+        TEST_ASSERT_NOT_NULL_MESSAGE(d, "the session directory should exist");
+
+        int checked = 0;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strstr(ent->d_name, ".session.json") == NULL) continue;
+
+            char file[768];
+            snprintf(file, sizeof(file), "%s/%s", dir, ent->d_name);
+
+            struct stat st;
+            TEST_ASSERT_EQUAL_INT_MESSAGE(0, stat(file, &st), "stat should succeed");
+            TEST_ASSERT_EQUAL_HEX_MESSAGE(0600, st.st_mode & 0777,
+                "a persisted session holds credentials and must be owner-only");
+            checked++;
+        }
+        closedir(d);
+        TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, checked,
+            "at least one session file should have been inspected");
+
+        struct stat ds;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, stat(dir, &ds), "stat on the dir should succeed");
+        TEST_ASSERT_EQUAL_HEX_MESSAGE(0700, ds.st_mode & 0777,
+            "the session directory should not be traversable by others");
+    }
+#endif
 
     /* Reopen against the same directory: the session rehydrates on demand. */
     sr_surreal_rpc_t *rpc2 = NULL;

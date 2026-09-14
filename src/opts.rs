@@ -122,6 +122,20 @@ pub struct Options {
     /// and is rehydrated on demand, so sessions survive the context being torn
     /// down and rebuilt. Ignored by `sr_connect_with_options`, which has no
     /// session map of its own.
+    ///
+    /// # These files hold credentials
+    ///
+    /// A session is serialised whole, and a session carries its authentication
+    /// token, its record-authentication data and its variables. They are
+    /// written as plain JSON: nothing here is encrypted or obfuscated, and
+    /// anything that can read the file can replay the session.
+    ///
+    /// The library restricts the directory and its files to the current user
+    /// (0700 / 0600 on unix; on other platforms the inherited ACL is all there
+    /// is). That is sufficient on a server, which is what upstream built this
+    /// for. It is not a disk-encryption scheme, so treat the directory as
+    /// credential storage: keep it off shared or synced volumes, and think hard
+    /// before enabling it on hardware the end user controls.
     pub session_dir: *const c_char,
 }
 

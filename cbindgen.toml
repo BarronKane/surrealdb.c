@@ -11,11 +11,12 @@ after_includes = """
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
+#define SR_TIMEOUT -4
 """
 
 [export]
 prefix = "sr_"
-exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
+exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_TIMEOUT"]
 
 
 [export.rename]

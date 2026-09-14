@@ -48,6 +48,10 @@ pub const SR_NONE: c_int = 0;
 pub const SR_CLOSED: c_int = -1;
 pub const SR_ERROR: c_int = -2;
 pub const SR_FATAL: c_int = -3;
+/// A bounded wait expired with nothing to report. Distinct from SR_NONE, which
+/// means the stream has ended: a timeout says to call again, SR_NONE says not
+/// to. Only the `_timeout` variants ever return this.
+pub const SR_TIMEOUT: c_int = -4;
 
 /// Safely write an error message to an error pointer
 /// 

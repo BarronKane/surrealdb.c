@@ -104,6 +104,7 @@ impl SurrealRpc {
             let inner = SurrealRpcInner {
                 kvs,
                 session_map,
+                live_queries: HashMap::new(),
                 notify_rx,
                 default_session: default_session_id,
                 session_dir: options.session_dir_path(),
@@ -230,7 +231,16 @@ impl SurrealRpc {
         })
     }
 
-    /// Close a session, cancelling the live queries and transactions it owns.
+    /// Close a session, cancelling the live queries it owns.
+    ///
+    /// Each cancelled live query emits one final notification on the stream
+    /// from `sr_surreal_rpc_notifications`, with action `KILLED` and no result.
+    /// That is the signal that a live query is over; nothing further arrives
+    /// for it.
+    ///
+    /// The durable copy of the session is removed first, so a detached session
+    /// cannot be rehydrated. There are no client-managed transactions on this
+    /// transport, so there are none to cancel.
     ///
     /// # Safety
     ///
@@ -257,6 +267,14 @@ impl SurrealRpc {
     }
 
     /// Return a session to its initial state without closing it.
+    ///
+    /// This also cancels the session's live queries -- a reset drops the
+    /// identity they were registered under, so they must not keep delivering.
+    /// Each emits a final `KILLED` notification, as with
+    /// `sr_rpc_session_detach`. The same applies to the authentication methods
+    /// reached over `sr_surreal_rpc_execute`: `signin`, `signup`,
+    /// `authenticate`, `refresh` and `invalidate` all retire the session's live
+    /// queries, because the caller they were authorised for no longer exists.
     ///
     /// # Safety
     ///
@@ -614,6 +632,57 @@ pub extern "C" fn uuid_arr_free(ptr: *mut Uuid, len: c_int) {
     ArrayGen { ptr, len }.free()
 }
 
+/// Write a file readable only by the current user.
+///
+/// `std::fs::write` would leave it at 0644 after a default umask, i.e. readable
+/// by every account on the box -- and these files contain session tokens. The
+/// mode is applied at creation and then again explicitly, because `mode()` has
+/// no effect on a temporary file that already exists from an earlier crash.
+#[cfg(unix)]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
+/// No mode bits to set; the file inherits the directory's ACL.
+#[cfg(not(unix))]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// Keep the session directory itself owner-only. Best effort: a caller may have
+/// pointed us at a directory it does not own, and failing the write over that
+/// would be worse than leaving the permissions as the operator set them.
+#[cfg(unix)]
+fn restrict_dir(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_dir: &std::path::Path) {}
+
+/// Who registered a live query, and where.
+///
+/// The namespace and database are recorded because cancelling a live query
+/// means running `KILL` against the database it was registered in, and by the
+/// time we need to do that the owning session may already be gone.
+#[derive(Clone)]
+struct LiveQueryOwner {
+    session: uuid::Uuid,
+    namespace: Option<String>,
+    database: Option<String>,
+}
+
 #[allow(dead_code)]
 struct SurrealRpcInner {
     kvs: Arc<Datastore>,
@@ -621,6 +690,12 @@ struct SurrealRpcInner {
     /// off. See the RpcProtocol impl below.
     session_dir: Option<std::path::PathBuf>,
     session_map: HashMap<uuid::Uuid, Arc<RwLock<Session>>>,
+    /// Live queries registered through this context, keyed by live-query id.
+    ///
+    /// Upstream keeps no such registry: it hands us `handle_live` /
+    /// `handle_kill` and expects the transport to track ownership, because only
+    /// the transport knows which client a live query belongs to.
+    live_queries: HashMap<uuid::Uuid, LiveQueryOwner>,
     /// Receiving half of the live-query notification channel handed to the
     /// datastore at construction. Cloned out by `sr_surreal_rpc_notifications`.
     notify_rx: Receiver<PublicNotification>,
@@ -646,22 +721,64 @@ impl RpcProtocol for SurrealRpcInner {
         DbResult::Other(sdbValue::String(ver_str))
     }
 
+    // ----------------------------------------------------------------------
+    // Live query ownership
+    // ----------------------------------------------------------------------
+    //
+    // These four hooks are the transport's half of live-query lifecycle.
+    // Upstream deliberately has no default for `cleanup_lqs` /
+    // `cleanup_all_lqs`, and defaults `handle_live` / `handle_kill` to
+    // `unimplemented!()` when LQ_SUPPORT is true, because a live query outlives
+    // the statement that created it and only the transport knows whose it is.
+    //
+    // Core calls `cleanup_lqs` from seven places -- `signup`, `signin`,
+    // `authenticate`, `refresh`, `invalidate`, `reset` and `del_session` -- and
+    // five of those are authentication changes rather than teardown. That is
+    // the point: a live query registered under one identity must stop when the
+    // session's identity changes, or it keeps streaming rows to a caller that
+    // is no longer entitled to them.
+
     const LQ_SUPPORT: bool = true;
 
     async fn handle_live(
         &self,
-        _lqid: &uuid::Uuid,
-        _session_id: uuid::Uuid,
-        _namespace: Option<String>,
-        _database: Option<String>,
+        lqid: &uuid::Uuid,
+        session_id: uuid::Uuid,
+        namespace: Option<String>,
+        database: Option<String>,
     ) {
+        self.live_queries.insert(
+            *lqid,
+            LiveQueryOwner {
+                session: session_id,
+                namespace,
+                database,
+            },
+        );
     }
 
-    async fn handle_kill(&self, _lqid: &uuid::Uuid) {}
+    async fn handle_kill(&self, lqid: &uuid::Uuid) {
+        // The KILL has already run; this only retires the bookkeeping.
+        self.live_queries.remove(lqid);
+    }
 
-    async fn cleanup_lqs(&self, _session_id: &uuid::Uuid) {}
+    async fn cleanup_lqs(&self, session_id: &uuid::Uuid) {
+        let victims: Vec<(uuid::Uuid, LiveQueryOwner)> = self
+            .live_queries
+            .to_vec()
+            .into_iter()
+            .filter(|(_, owner)| &owner.session == session_id)
+            .collect();
+        self.kill_live_queries(victims).await;
+    }
 
-    async fn cleanup_all_lqs(&self) {}
+    async fn cleanup_all_lqs(&self) {
+        // Core never calls this; it exists for a transport shutting down while
+        // its datastore lives on. Ours usually goes away with the context, but
+        // a caller that shares a datastore needs it to mean something.
+        let victims = self.live_queries.to_vec();
+        self.kill_live_queries(victims).await;
+    }
 
     // ----------------------------------------------------------------------
     // Session persistence
@@ -698,17 +815,25 @@ impl RpcProtocol for SurrealRpcInner {
         let Some(path) = self.session_path(id) else {
             return;
         };
+        // This is the whole session, which means the auth token, the record
+        // auth data and the session variables, as plain JSON. See the warning
+        // on `Options::session_dir`; the file mode below is the only thing
+        // standing between that and any other account on the machine.
         let Ok(bytes) = serde_json::to_vec(session) else {
             return;
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
+            restrict_dir(dir);
         }
         // Written via a temporary file and renamed, so a crash mid-write
         // cannot leave a half-session that load_session would then reject.
         let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, &bytes).is_ok() {
+        if write_private(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
+        } else {
+            // Do not leave a partial file behind holding a token.
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -730,6 +855,38 @@ impl RpcProtocol for SurrealRpcInner {
 }
 
 impl SurrealRpcInner {
+    /// Cancel the given live queries and drop them from the registry.
+    ///
+    /// `KILL` is issued as the system rather than as the registering session:
+    /// every caller of this arrives because that session was destroyed or
+    /// re-authenticated, so its credentials are either gone or no longer the
+    /// ones that should authorise the cancellation.
+    ///
+    /// The registry entry is removed first. A `KILL` that fails must not leave
+    /// the id behind to be retried forever on every later cleanup, and a live
+    /// query whose namespace was never recorded cannot be addressed by `KILL`
+    /// at all.
+    async fn kill_live_queries(&self, victims: Vec<(uuid::Uuid, LiveQueryOwner)>) {
+        for (lqid, owner) in victims {
+            self.live_queries.remove(&lqid);
+
+            let (Some(ns), Some(db)) = (owner.namespace, owner.database) else {
+                continue;
+            };
+
+            // `with_rt` is required, not decorative: KILL is a realtime
+            // statement, and a session without it is refused with
+            // LiveQueryNotSupported.
+            let session = Session::owner().with_rt(true).with_ns(&ns).with_db(&db);
+            let mut vars = surrealdb::types::Variables::new();
+            vars.insert("lqid", sdbValue::Uuid(surrealdb::types::Uuid::from(lqid)));
+
+            // Best effort: the live query may already be gone, and there is no
+            // caller left to report a failure to.
+            let _ = self.kvs.execute("KILL $lqid", &session, Some(vars)).await;
+        }
+    }
+
     /// Path of the file backing one session, or `None` when persistence is off.
     ///
     /// The uuid is rendered by `Uuid::to_string`, which is hyphenated hex and

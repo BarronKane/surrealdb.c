@@ -8,11 +8,12 @@
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
+#define SR_TIMEOUT -4
 
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 5
-#define SR_VERSION_STRING "0.2.5"
+#define SR_VERSION_PATCH 6
+#define SR_VERSION_STRING "0.2.6"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -229,6 +230,20 @@ typedef struct sr_option_t {
    * and is rehydrated on demand, so sessions survive the context being torn
    * down and rebuilt. Ignored by `sr_connect_with_options`, which has no
    * session map of its own.
+   *
+   * # These files hold credentials
+   *
+   * A session is serialised whole, and a session carries its authentication
+   * token, its record-authentication data and its variables. They are
+   * written as plain JSON: nothing here is encrypted or obfuscated, and
+   * anything that can read the file can replay the session.
+   *
+   * The library restricts the directory and its files to the current user
+   * (0700 / 0600 on unix; on other platforms the inherited ACL is all there
+   * is). That is sufficient on a server, which is what upstream built this
+   * for. It is not a disk-encryption scheme, so treat the directory as
+   * credential storage: keep it off shared or synced volumes, and think hard
+   * before enabling it on hardware the end user controls.
    */
   const char *session_dir;
 } sr_option_t;
@@ -1730,7 +1745,16 @@ int sr_rpc_session_attach(const struct sr_surreal_rpc_t *self,
                           struct sr_uuid_t *session_id);
 
 /**
- * Close a session, cancelling the live queries and transactions it owns.
+ * Close a session, cancelling the live queries it owns.
+ *
+ * Each cancelled live query emits one final notification on the stream
+ * from `sr_surreal_rpc_notifications`, with action `KILLED` and no result.
+ * That is the signal that a live query is over; nothing further arrives
+ * for it.
+ *
+ * The durable copy of the session is removed first, so a detached session
+ * cannot be rehydrated. There are no client-managed transactions on this
+ * transport, so there are none to cancel.
  *
  * # Safety
  *
@@ -1743,6 +1767,14 @@ int sr_rpc_session_detach(const struct sr_surreal_rpc_t *self,
 
 /**
  * Return a session to its initial state without closing it.
+ *
+ * This also cancels the session's live queries -- a reset drops the
+ * identity they were registered under, so they must not keep delivering.
+ * Each emits a final `KILLED` notification, as with
+ * `sr_rpc_session_detach`. The same applies to the authentication methods
+ * reached over `sr_surreal_rpc_execute`: `signin`, `signup`,
+ * `authenticate`, `refresh` and `invalidate` all retire the session's live
+ * queries, because the caller they were authorised for no longer exists.
  *
  * # Safety
  *
@@ -2000,9 +2032,9 @@ void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
  *
  * # Blocking and shutdown
  *
- * This call blocks until a notification is available; there is no timeout or
- * non-blocking variant. It is intended to be driven from a dedicated thread
- * rather than a latency-sensitive one.
+ * This call blocks until a notification is available. It is intended to be
+ * driven from a dedicated thread rather than a latency-sensitive one; see
+ * `sr_stream_next_timeout` for a bounded or non-blocking wait.
  *
  * A stream borrows the runtime owned by the connection it was opened on, so
  * teardown is ordered: call `sr_stream_kill` first, then
@@ -2012,9 +2044,40 @@ void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
  *
  * There is no way to release a reader already parked in this call from another
  * thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
- * this only when an event is expected.
+ * this only when an event is expected, and prefer `sr_stream_next_timeout`
+ * for a reader that has to be able to give up.
  */
 int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notification_ptr);
+
+/**
+ * Get the next notification, waiting no longer than `timeout_ms`
+ *
+ * Returns 1 and writes to `notification_ptr` when a notification is
+ * received, SR_TIMEOUT when the wait expired with the stream still open,
+ * SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+ *
+ * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
+ * `sr_stream_next`, zero polls once and returns immediately, and a positive
+ * value waits up to that many milliseconds.
+ *
+ * # SR_TIMEOUT is not SR_NONE
+ *
+ * A timeout means nothing has arrived yet and the stream is still live, so
+ * call again. SR_NONE means the stream has ended and calling again is
+ * pointless. Collapsing the two turns a merely slow notification into an
+ * abandoned stream, or an ended stream into a spin.
+ *
+ * An expired wait consumes nothing. Notifications queue in a channel, and a
+ * poll that finds it empty leaves any later arrival in place, so polling in
+ * a loop cannot lose an event.
+ *
+ * This is the call for a reader that must stay responsive to anything other
+ * than the stream -- a shutdown flag, usually, since `sr_stream_kill` cannot
+ * release a reader already parked inside `sr_stream_next`.
+ */
+int sr_stream_next_timeout(struct sr_stream_t *self,
+                           struct sr_notification_t *notification_ptr,
+                           int timeout_ms);
 
 /**
  * Kill and free a stream
@@ -2032,17 +2095,37 @@ void sr_stream_kill(struct sr_stream_t *stream);
  *
  * # Blocking and shutdown
  *
- * This call blocks until a notification is available; there is no timeout or
- * non-blocking variant. It is intended to be driven from a dedicated thread
- * rather than a latency-sensitive one.
+ * This call blocks until a notification is available. It is intended to be
+ * driven from a dedicated thread rather than a latency-sensitive one; see
+ * `sr_rpc_stream_next_timeout` for a bounded or non-blocking wait.
  *
  * To retire that thread, free the connection the stream came from. Doing so
  * drops the sending half of the notification channel, and a reader parked
  * inside this function returns SR_CLOSED. The stream itself stays valid and
- * must still be freed. Freeing the connection is the only way to release a
- * blocked reader.
+ * must still be freed.
  */
 int sr_rpc_stream_next(struct sr_RpcStream *self, uint8_t **res_ptr);
+
+/**
+ * Get the next notification, waiting no longer than `timeout_ms`
+ *
+ * Returns the payload length and writes to `res_ptr` on success, SR_TIMEOUT
+ * when the wait expired with the channel still open, SR_CLOSED when the
+ * sending half is gone, and SR_ERROR if the payload could not be encoded.
+ *
+ * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
+ * `sr_rpc_stream_next`, zero polls once and returns immediately, and a
+ * positive value waits up to that many milliseconds.
+ *
+ * SR_TIMEOUT means call again; SR_CLOSED means stop. An expired wait takes
+ * nothing off the channel, so a later notification is still delivered.
+ *
+ * Unlike `sr_stream_next_timeout` this does not touch a tokio runtime, which
+ * is deliberate: an RpcStream outlives the connection it came from, so it
+ * must not hold a handle to a runtime that may already be shut down. The
+ * wait is therefore a poll at millisecond granularity rather than a timer.
+ */
+int sr_rpc_stream_next_timeout(struct sr_RpcStream *self, uint8_t **res_ptr, int timeout_ms);
 
 /**
  * Free an RpcStream
