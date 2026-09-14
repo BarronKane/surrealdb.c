@@ -8,12 +8,11 @@
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
-#define SR_TIMEOUT -4
 
 #define SR_VERSION_MAJOR 0
-#define SR_VERSION_MINOR 2
-#define SR_VERSION_PATCH 6
-#define SR_VERSION_STRING "0.2.6"
+#define SR_VERSION_MINOR 3
+#define SR_VERSION_PATCH 0
+#define SR_VERSION_STRING "0.3.0"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -87,7 +86,7 @@ typedef struct sr_opaque_object_internal_t sr_opaque_object_internal_t;
  * Wraps a `Receiver<PublicNotification>` from the datastore's notification channel.
  * Uses synchronous blocking receives, so no async drop is required.
  */
-typedef struct sr_RpcStream sr_RpcStream;
+typedef struct sr_rpc_stream_t sr_rpc_stream_t;
 
 /**
  * Stream for receiving live query notifications
@@ -646,14 +645,14 @@ typedef struct sr_value_t {
 /**
  * when code = 0 there is no error
  */
-typedef struct sr_SurrealError {
+typedef struct sr_error_t {
   int code;
   sr_string_t msg;
-} sr_SurrealError;
+} sr_error_t;
 
 typedef struct sr_arr_res_t {
   struct sr_array_t ok;
-  struct sr_SurrealError err;
+  struct sr_error_t err;
 } sr_arr_res_t;
 
 typedef struct sr_credentials {
@@ -1836,6 +1835,39 @@ int sr_rpc_execute_on(const struct sr_surreal_rpc_t *self,
                       int len);
 
 /**
+ * Run a query on a session and get typed results back.
+ *
+ * The typed calls (`sr_query`, `sr_select`, `sr_create`, ...) live on the
+ * `sr_connect` handle, which has no sessions; sessions live here, where
+ * until 0.3 every operation had to be hand-encoded as CBOR. This is the
+ * bridge: the same `sr_arr_res_t` array `sr_query` returns, but executed
+ * against a caller-chosen session, so per-session state (`USE`, auth,
+ * `LET` variables) applies.
+ *
+ * One `sr_arr_res_t` per statement, in order. A statement that failed
+ * carries its message in `.err` while the others still carry their rows --
+ * the per-statement error channel, not a single all-or-nothing failure.
+ * The return value is the number of statements, or negative on a failure
+ * to run the query at all.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `res_ptr` must be a valid pointer to receive the results
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ * - `query` must be a valid null-terminated string
+ * - `vars` must be a valid pointer to an object, or null for none
+ *
+ * Free the results with `sr_arr_res_arr_free`.
+ */
+int sr_rpc_query_on(const struct sr_surreal_rpc_t *self,
+                    sr_string_t *err_ptr,
+                    struct sr_arr_res_t **res_ptr,
+                    const struct sr_uuid_t *session_id,
+                    const char *query,
+                    const struct sr_object_t *vars);
+
+/**
  * Get a stream for receiving live query notifications
  *
  * # Safety
@@ -1847,7 +1879,7 @@ int sr_rpc_execute_on(const struct sr_surreal_rpc_t *self,
  */
 int sr_surreal_rpc_notifications(const struct sr_surreal_rpc_t *self,
                                  sr_string_t *err_ptr,
-                                 struct sr_RpcStream **stream_ptr);
+                                 struct sr_rpc_stream_t **stream_ptr);
 
 /**
  * Free an RPC context
@@ -2028,7 +2060,9 @@ void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
  * Get the next notification, blocking until one arrives
  *
  * Returns 1 and writes to `notification_ptr` when a notification is received,
- * SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+ * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
+ * It never returns SR_NONE: a blocking call has nothing to report until it
+ * has something.
  *
  * # Blocking and shutdown
  *
@@ -2053,19 +2087,22 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
  * Get the next notification, waiting no longer than `timeout_ms`
  *
  * Returns 1 and writes to `notification_ptr` when a notification is
- * received, SR_TIMEOUT when the wait expired with the stream still open,
- * SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+ * received, SR_NONE when the wait expired with the stream still open,
+ * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
  *
  * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
  * `sr_stream_next`, zero polls once and returns immediately, and a positive
  * value waits up to that many milliseconds.
  *
- * # SR_TIMEOUT is not SR_NONE
+ * # SR_NONE is not SR_CLOSED
  *
- * A timeout means nothing has arrived yet and the stream is still live, so
- * call again. SR_NONE means the stream has ended and calling again is
+ * SR_NONE means nothing has arrived yet and the stream is still live, so
+ * call again. SR_CLOSED means the stream has ended and calling again is
  * pointless. Collapsing the two turns a merely slow notification into an
  * abandoned stream, or an ended stream into a spin.
+ *
+ * The split falls on the sign, so `r > 0` is a notification, `r == 0` is
+ * "not yet" and `r < 0` is "stop", which is the check most callers want.
  *
  * An expired wait consumes nothing. Notifications queue in a channel, and a
  * poll that finds it empty leaves any later arrival in place, so polling in
@@ -2104,12 +2141,12 @@ void sr_stream_kill(struct sr_stream_t *stream);
  * inside this function returns SR_CLOSED. The stream itself stays valid and
  * must still be freed.
  */
-int sr_rpc_stream_next(struct sr_RpcStream *self, uint8_t **res_ptr);
+int sr_rpc_stream_next(struct sr_rpc_stream_t *self, uint8_t **res_ptr);
 
 /**
  * Get the next notification, waiting no longer than `timeout_ms`
  *
- * Returns the payload length and writes to `res_ptr` on success, SR_TIMEOUT
+ * Returns the payload length and writes to `res_ptr` on success, SR_NONE
  * when the wait expired with the channel still open, SR_CLOSED when the
  * sending half is gone, and SR_ERROR if the payload could not be encoded.
  *
@@ -2117,7 +2154,7 @@ int sr_rpc_stream_next(struct sr_RpcStream *self, uint8_t **res_ptr);
  * `sr_rpc_stream_next`, zero polls once and returns immediately, and a
  * positive value waits up to that many milliseconds.
  *
- * SR_TIMEOUT means call again; SR_CLOSED means stop. An expired wait takes
+ * SR_NONE means call again; SR_CLOSED means stop. An expired wait takes
  * nothing off the channel, so a later notification is still delivered.
  *
  * Unlike `sr_stream_next_timeout` this does not touch a tokio runtime, which
@@ -2125,12 +2162,12 @@ int sr_rpc_stream_next(struct sr_RpcStream *self, uint8_t **res_ptr);
  * must not hold a handle to a runtime that may already be shut down. The
  * wait is therefore a poll at millisecond granularity rather than a timer.
  */
-int sr_rpc_stream_next_timeout(struct sr_RpcStream *self, uint8_t **res_ptr, int timeout_ms);
+int sr_rpc_stream_next_timeout(struct sr_rpc_stream_t *self, uint8_t **res_ptr, int timeout_ms);
 
 /**
  * Free an RpcStream
  */
-void sr_rpc_stream_free(struct sr_RpcStream *stream);
+void sr_rpc_stream_free(struct sr_rpc_stream_t *stream);
 
 /**
  * Free a string allocated by SurrealDB

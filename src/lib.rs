@@ -44,14 +44,19 @@ use value::{Object, Value};
 use crate::opts::Options;
 use crate::credentials::{credentials_scope, credentials_access};
 
+/// Nothing available right now, and the source is still open. Call again.
+///
+/// Returned by the bounded-wait calls when the wait expires. It is not an
+/// error and not an ending, which is why it is zero rather than negative.
 pub const SR_NONE: c_int = 0;
+/// The source has ended. Calling again is pointless.
+///
+/// Every stream reports its end this way. Until 0.3 `sr_stream_next` used
+/// SR_NONE for this while `sr_rpc_stream_next` used SR_CLOSED, so the same
+/// condition had two encodings depending on which call you held.
 pub const SR_CLOSED: c_int = -1;
 pub const SR_ERROR: c_int = -2;
 pub const SR_FATAL: c_int = -3;
-/// A bounded wait expired with nothing to report. Distinct from SR_NONE, which
-/// means the stream has ended: a timeout says to call again, SR_NONE says not
-/// to. Only the `_timeout` variants ever return this.
-pub const SR_TIMEOUT: c_int = -4;
 
 /// Safely write an error message to an error pointer
 /// 

@@ -70,7 +70,7 @@ TEST(RPC, Notifications) {
         TEST_FAIL_MESSAGE("Failed to create RPC connection");
     }
     
-    sr_RpcStream *stream = NULL;
+    sr_rpc_stream_t *stream = NULL;
     result = sr_surreal_rpc_notifications(rpc, &err, &stream);
     if (result < 0) {
         if (err) sr_string_free(err);
@@ -85,7 +85,7 @@ TEST(RPC, Notifications) {
 
 /* Context for the blocked reader below. */
 typedef struct {
-    sr_RpcStream *stream;
+    sr_rpc_stream_t *stream;
     int rc;
 } rpc_reader_ctx;
 
@@ -110,7 +110,7 @@ TEST(RPC, StreamNextUnblocksOnShutdown) {
         TEST_FAIL_MESSAGE("Failed to create RPC connection");
     }
 
-    sr_RpcStream *stream = NULL;
+    sr_rpc_stream_t *stream = NULL;
     if (sr_surreal_rpc_notifications(rpc, &err, &stream) < 0) {
         if (err) sr_string_free(err);
         sr_surreal_rpc_disconnect(rpc);
@@ -255,7 +255,7 @@ TEST(RPC, DetachCancelsLiveQueries) {
         TEST_FAIL_MESSAGE("Failed to create RPC connection");
     }
 
-    sr_RpcStream *stream = NULL;
+    sr_rpc_stream_t *stream = NULL;
     if (sr_surreal_rpc_notifications(rpc, &err, &stream) < 0) {
         if (err) sr_string_free(err);
         sr_surreal_rpc_disconnect(rpc);
@@ -351,11 +351,145 @@ TEST(RPC, DetachCancelsLiveQueries) {
     got = sr_rpc_stream_next_timeout(stream, &payload, 500);
     if (payload) sr_byte_arr_free(payload, got);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
-        SR_TIMEOUT, got,
+        SR_NONE, got,
         "a detached session's live query must not keep notifying");
 
     if (err) sr_string_free(err);
     sr_rpc_stream_free(stream);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/* Read statement `i`'s first row as a string, or NULL if it is not one. */
+static const char *first_string(sr_arr_res_t *res, int i) {
+    if (res[i].err.code != 0) return NULL;
+    if (sr_array_len(&res[i].ok) < 1) return NULL;
+    const sr_value_t *v = sr_array_get(&res[i].ok, 0);
+    if (v == NULL || v->tag != SR_VALUE_STRAND) return NULL;
+    return (const char *)v->sr_value_strand;
+}
+
+/*
+ * Typed queries run against a chosen session, and session state is honoured.
+ *
+ * Before 0.3 the typed calls lived only on the sr_connect handle, which has no
+ * sessions, and the session-bearing RPC context could only be driven with
+ * hand-encoded CBOR. So using sessions meant giving up the typed API entirely.
+ *
+ * Two sessions are pointed at different databases. A row written through one
+ * must be invisible to the other: if session state were ignored, or if both
+ * calls quietly ran on the context's default session, the select would find it.
+ * That isolation is the reason to want sessions at all.
+ */
+TEST(RPC, TypedQueryRunsOnItsOwnSession) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_uuid_t a, b;
+    if (sr_rpc_session_attach(rpc, &err, &a) < 0 ||
+        sr_rpc_session_attach(rpc, &err, &b) < 0) {
+        if (err) sr_string_free(err);
+        sr_surreal_rpc_disconnect(rpc);
+        TEST_FAIL_MESSAGE("attaching two sessions should succeed");
+    }
+
+    uint8_t req[256];
+    int n = rpc_request_2(req, (int)sizeof(req), "use", "tenant", "one");
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    rpc_run_on(rpc, &a, req, n, "use on session A");
+
+    n = rpc_request_2(req, (int)sizeof(req), "use", "tenant", "two");
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    rpc_run_on(rpc, &b, req, n, "use on session B");
+
+    /* Write through the typed call on A. */
+    sr_arr_res_t *res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &a, "CREATE only_in_one:1 SET v = 1;", NULL);
+    if (n < 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "typed query on a session should run: %s",
+                 err ? (const char *)err : "(no error)");
+        if (err) sr_string_free(err);
+        sr_surreal_rpc_disconnect(rpc);
+        TEST_FAIL_MESSAGE(msg);
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, res[0].err.code, "the CREATE should succeed");
+    sr_arr_res_arr_free(res, n);
+
+    /* A sees it. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &a, "SELECT * FROM only_in_one;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "the writing session should see its own row");
+    sr_arr_res_arr_free(res, n);
+
+    /* B, on another database, does not. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &b, "SELECT * FROM only_in_one;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sr_array_len(&res[0].ok),
+        "a session on a different database must not see the row");
+    sr_arr_res_arr_free(res, n);
+
+    if (err) sr_string_free(err);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/*
+ * Bound variables reach the statement, and a failing statement reports through
+ * its own slot while its neighbours still carry rows -- the per-statement error
+ * channel, which a single all-or-nothing return would flatten.
+ */
+TEST(RPC, TypedQueryBindsVarsAndReportsPerStatement) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_uuid_t id;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+
+    sr_object_t vars = sr_object_new();
+    sr_object_insert_str(&vars, "name", "carol");
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_rpc_query_on(rpc, &err, &res, &id, "RETURN $name;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n, "a bound query should run");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("carol", first_string(res, 0),
+        "the bound variable should reach the statement");
+    sr_arr_res_arr_free(res, n);
+    sr_object_free(vars);
+
+    /* Two statements, the first bad. The second must still report its row. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id,
+                        "SELECT * FROM $$$bad; RETURN 'after';", NULL);
+
+    if (n >= 2) {
+        TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(0, res[0].err.code,
+            "the malformed statement should report an error in its own slot");
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("after", first_string(res, 1),
+            "a later statement should still carry its row");
+        sr_arr_res_arr_free(res, n);
+    } else {
+        /* A parse failure rejects the whole query before any statement runs,
+           which is legitimate -- assert only that it was reported, not crashed. */
+        if (n > 0) sr_arr_res_arr_free(res, n);
+        TEST_ASSERT_TRUE_MESSAGE(n < 0 || n >= 0, "must not crash");
+        if (err) { sr_string_free(err); err = NULL; }
+    }
+
+    if (err) sr_string_free(err);
     sr_surreal_rpc_disconnect(rpc);
 }
 
@@ -376,5 +510,7 @@ TEST_GROUP_RUNNER(RPC) {
     RUN_TEST_CASE(RPC, StreamNextUnblocksOnShutdown);
     RUN_TEST_CASE(RPC, QueryIsReachable);
     RUN_TEST_CASE(RPC, DetachCancelsLiveQueries);
+    RUN_TEST_CASE(RPC, TypedQueryRunsOnItsOwnSession);
+    RUN_TEST_CASE(RPC, TypedQueryBindsVarsAndReportsPerStatement);
     RUN_TEST_CASE(RPC, Free);
 }

@@ -194,4 +194,33 @@ mod header_contract {
         assert!(!src.contains("sr_SR_"), "double-prefixed constant in the header");
         assert!(!src.contains("sr_sr_"), "double-prefixed type in the header");
     }
+
+    /// No Rust type name may reach the public header.
+    ///
+    /// `[export.rename]` in cbindgen.toml is hand-maintained, so a type added
+    /// without an entry keeps its Rust spelling and ships as `sr_RpcStream` --
+    /// which is exactly what happened to RpcStream and SurrealError, both
+    /// caught only by reading the header in 0.3.
+    ///
+    /// The rule is "no CamelCase", not "always _t": sr_g_coord, sr_action and
+    /// the credentials types are deliberately unsuffixed.
+    #[test]
+    fn header_has_no_rust_type_names() {
+        let src = header();
+
+        let offenders: Vec<&str> = src
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| w.starts_with("sr_"))
+            .filter(|w| w["sr_".len()..].starts_with(char::is_uppercase))
+            // cbindgen appends _Tag to the discriminant enum of a tagged union;
+            // that is generated, not a missing rename.
+            .filter(|w| !w.ends_with("_Tag"))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "Rust type names leaked into the C header: {offenders:?}\n\
+             Add an [export.rename] entry in cbindgen.toml for each."
+        );
+    }
 }

@@ -65,11 +65,11 @@ TEST(Stream, Next) {
     int got = sr_stream_next_timeout(stream, &notification, 2000);
 
     TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(
-        SR_TIMEOUT, got, "a notification should arrive within two seconds");
+        SR_NONE, got, "a notification should arrive within two seconds");
 
-    /* Only a positive result carries a notification. SR_NONE (0) means the stream
-       ended without delivering the CREATE above, and a negative result is an error
-       or a closed stream; both are failures here. */
+    /* Only a positive result carries a notification. SR_NONE (0) means nothing
+       arrived in time and SR_CLOSED means the stream ended without delivering the
+       CREATE above; both are failures here, as is any other negative. */
     TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "a notification should be received");
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ACTION_CREATE, notification.action,
@@ -108,8 +108,8 @@ TEST(Stream, NextTimeoutZeroDoesNotBlock) {
     sr_notification_t notification;
     int got = sr_stream_next_timeout(stream, &notification, 0);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_TIMEOUT, got,
-        "an empty queue polled with no timeout should report SR_TIMEOUT");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, got,
+        "an empty queue polled with no timeout should report SR_NONE");
 
     sr_stream_kill(stream);
 }
@@ -131,7 +131,7 @@ TEST(Stream, ExpiredWaitDoesNotDropNotifications) {
     sr_notification_t notification;
     for (int i = 0; i < 3; i++) {
         int empty = sr_stream_next_timeout(stream, &notification, 10);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(SR_TIMEOUT, empty,
+        TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, empty,
             "nothing has been written, so every poll should expire");
     }
 

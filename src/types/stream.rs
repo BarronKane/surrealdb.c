@@ -1,4 +1,5 @@
 use std::ffi::c_int;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
@@ -8,9 +9,21 @@ use surrealdb::types::{Value as sdbValue, Notification as PublicNotification};
 use tokio::runtime::Handle;
 
 use crate::SR_ERROR;
-use crate::{notification::Notification, SR_CLOSED, SR_NONE, SR_TIMEOUT};
+use crate::{notification::Notification, SR_CLOSED, SR_NONE};
 
 use super::array::MakeArray;
+
+/// Run a stream call, converting a panic into SR_ERROR.
+///
+/// These are `extern "C"`, so an escaping panic is a non-unwinding abort: the
+/// process dies with no diagnostic and the C caller gets no chance to clean up.
+/// That is a bad trade for a library embedded in someone else's application,
+/// and these functions are the ones that drive a tokio runtime, which is where
+/// a panic is most plausible. The panic message still reaches stderr before
+/// this returns, so a library bug stays visible rather than being swallowed.
+fn guard(f: impl FnOnce() -> c_int) -> c_int {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or(SR_ERROR)
+}
 
 /// Stream for receiving live query notifications
 ///
@@ -31,7 +44,9 @@ impl Stream {
     /// Get the next notification, blocking until one arrives
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is received,
-    /// SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
+    /// It never returns SR_NONE: a blocking call has nothing to report until it
+    /// has something.
     ///
     /// # Blocking and shutdown
     ///
@@ -51,29 +66,32 @@ impl Stream {
     /// for a reader that has to be able to give up.
     #[export_name = "sr_stream_next"]
     pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
-        match self.rt.block_on(self.inner.next()) {
+        guard(|| match self.rt.block_on(self.inner.next()) {
             Some(Ok(n)) => Self::deliver(n, notification_ptr),
             Some(Err(_)) => SR_ERROR,
-            None => SR_NONE,
-        }
+            None => SR_CLOSED,
+        })
     }
 
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is
-    /// received, SR_TIMEOUT when the wait expired with the stream still open,
-    /// SR_NONE when the stream has ended, and SR_ERROR on a stream error.
+    /// received, SR_NONE when the wait expired with the stream still open,
+    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
     ///
     /// `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
     /// `sr_stream_next`, zero polls once and returns immediately, and a positive
     /// value waits up to that many milliseconds.
     ///
-    /// # SR_TIMEOUT is not SR_NONE
+    /// # SR_NONE is not SR_CLOSED
     ///
-    /// A timeout means nothing has arrived yet and the stream is still live, so
-    /// call again. SR_NONE means the stream has ended and calling again is
+    /// SR_NONE means nothing has arrived yet and the stream is still live, so
+    /// call again. SR_CLOSED means the stream has ended and calling again is
     /// pointless. Collapsing the two turns a merely slow notification into an
     /// abandoned stream, or an ended stream into a spin.
+    ///
+    /// The split falls on the sign, so `r > 0` is a notification, `r == 0` is
+    /// "not yet" and `r < 0` is "stop", which is the check most callers want.
     ///
     /// An expired wait consumes nothing. Notifications queue in a channel, and a
     /// poll that finds it empty leaves any later arrival in place, so polling in
@@ -95,6 +113,7 @@ impl Stream {
         // holding a borrow of `rt`.
         let rt = self.rt.clone();
         let wait = Duration::from_millis(timeout_ms as u64);
+        guard(|| {
         // The timeout is constructed inside `block_on`, not outside it: building
         // one registers with the runtime's timer driver, and doing that from a
         // plain C thread panics with "there is no reactor running".
@@ -105,9 +124,10 @@ impl Stream {
         match rt.block_on(async { tokio::time::timeout(wait, inner.next()).await }) {
             Ok(Some(Ok(n))) => Self::deliver(n, notification_ptr),
             Ok(Some(Err(_))) => SR_ERROR,
-            Ok(None) => SR_NONE,
-            Err(_elapsed) => SR_TIMEOUT,
+            Ok(None) => SR_CLOSED,
+            Err(_elapsed) => SR_NONE,
         }
+        })
     }
 
     /// Hand one notification to C. Shared by both `next` variants.
@@ -133,9 +153,11 @@ impl Stream {
     /// so it must be called before `sr_surreal_disconnect` on that connection.
     #[export_name = "sr_stream_kill"]
     pub extern "C" fn kill(stream: *mut Stream) {
-        let boxed = unsafe { Box::from_raw(stream) };
-        let handle = boxed.rt.clone();
-        handle.block_on(async { drop(boxed) });
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let boxed = unsafe { Box::from_raw(stream) };
+            let handle = boxed.rt.clone();
+            handle.block_on(async { drop(boxed) });
+        }));
     }
 }
 
@@ -166,16 +188,18 @@ impl RpcStream {
     /// must still be freed.
     #[export_name = "sr_rpc_stream_next"]
     pub extern "C" fn next(&mut self, res_ptr: *mut *mut u8) -> c_int {
-        let notification = match self.rx.recv_blocking() {
-            Ok(n) => n,
-            Err(_) => return SR_CLOSED,
-        };
-        Self::encode(notification, res_ptr)
+        guard(|| {
+            let notification = match self.rx.recv_blocking() {
+                Ok(n) => n,
+                Err(_) => return SR_CLOSED,
+            };
+            Self::encode(notification, res_ptr)
+        })
     }
 
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
-    /// Returns the payload length and writes to `res_ptr` on success, SR_TIMEOUT
+    /// Returns the payload length and writes to `res_ptr` on success, SR_NONE
     /// when the wait expired with the channel still open, SR_CLOSED when the
     /// sending half is gone, and SR_ERROR if the payload could not be encoded.
     ///
@@ -183,7 +207,7 @@ impl RpcStream {
     /// `sr_rpc_stream_next`, zero polls once and returns immediately, and a
     /// positive value waits up to that many milliseconds.
     ///
-    /// SR_TIMEOUT means call again; SR_CLOSED means stop. An expired wait takes
+    /// SR_NONE means call again; SR_CLOSED means stop. An expired wait takes
     /// nothing off the channel, so a later notification is still delivered.
     ///
     /// Unlike `sr_stream_next_timeout` this does not touch a tokio runtime, which
@@ -196,6 +220,7 @@ impl RpcStream {
             return self.next(res_ptr);
         }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        guard(|| {
         let notification = loop {
             match self.rx.try_recv() {
                 Ok(n) => break n,
@@ -206,11 +231,12 @@ impl RpcStream {
             }
             let now = Instant::now();
             if now >= deadline {
-                return SR_TIMEOUT;
+                return SR_NONE;
             }
             std::thread::sleep(std::cmp::min(deadline - now, Duration::from_millis(1)));
         };
         Self::encode(notification, res_ptr)
+        })
     }
 
     /// CBOR-encode one notification into `res_ptr`. Shared by both variants.
@@ -241,8 +267,10 @@ impl RpcStream {
     /// Free an RpcStream
     #[export_name = "sr_rpc_stream_free"]
     pub extern "C" fn free(stream: *mut RpcStream) {
-        if !stream.is_null() {
-            let _ = unsafe { Box::from_raw(stream) };
-        }
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if !stream.is_null() {
+                let _ = unsafe { Box::from_raw(stream) };
+            }
+        }));
     }
 }

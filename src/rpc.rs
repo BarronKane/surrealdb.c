@@ -398,6 +398,115 @@ impl SurrealRpc {
         })
     }
 
+    /// Run a query on a session and get typed results back.
+    ///
+    /// The typed calls (`sr_query`, `sr_select`, `sr_create`, ...) live on the
+    /// `sr_connect` handle, which has no sessions; sessions live here, where
+    /// until 0.3 every operation had to be hand-encoded as CBOR. This is the
+    /// bridge: the same `sr_arr_res_t` array `sr_query` returns, but executed
+    /// against a caller-chosen session, so per-session state (`USE`, auth,
+    /// `LET` variables) applies.
+    ///
+    /// One `sr_arr_res_t` per statement, in order. A statement that failed
+    /// carries its message in `.err` while the others still carry their rows --
+    /// the per-statement error channel, not a single all-or-nothing failure.
+    /// The return value is the number of statements, or negative on a failure
+    /// to run the query at all.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `res_ptr` must be a valid pointer to receive the results
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    /// - `query` must be a valid null-terminated string
+    /// - `vars` must be a valid pointer to an object, or null for none
+    ///
+    /// Free the results with `sr_arr_res_arr_free`.
+    #[export_name = "sr_rpc_query_on"]
+    pub extern "C" fn rpc_query_on(
+        &self,
+        err_ptr: *mut string_t,
+        res_ptr: *mut *mut crate::result::ArrayResult,
+        session_id: *const Uuid,
+        query: *const c_char,
+        vars: *const crate::value::Object,
+    ) -> c_int {
+        if res_ptr.is_null() {
+            write_error(err_ptr, "res_ptr is null");
+            return SR_ERROR;
+        }
+        if query.is_null() {
+            write_error(err_ptr, "query is null");
+            return SR_ERROR;
+        }
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        let session = uuid::Uuid::from(unsafe { (*session_id).clone() });
+
+        with_async(self, err_ptr, move |ctx| async move {
+            let sql = unsafe { CStr::from_ptr(query) }
+                .to_str()
+                .map_err(|e| string_t::from(e.to_string()))?;
+
+            // `query` takes [sql, vars]; the vars object is omitted rather than
+            // sent empty, because core distinguishes "no bindings" from "an
+            // empty binding map" when validating params.
+            let mut params = surrealdb::types::Array::new();
+            params.push(sdbValue::String(sql.to_string()));
+            if !vars.is_null() {
+                let obj: surrealdb::types::Object = unsafe { &*vars }.clone().into();
+                params.push(sdbValue::Object(obj));
+            }
+
+            let inner = ctx.inner.read().await;
+            let client_session = inner.persist_sessions_enabled().then_some(session);
+
+            let res = <SurrealRpcInner as RpcProtocol>::execute(
+                &*inner,
+                None,
+                session,
+                client_session,
+                Method::Query,
+                params,
+            )
+            .await
+            .map_err(|e| string_t::from(e.to_string()))?;
+
+            // `query` always answers with DbResult::Query. Anything else means
+            // core changed shape under us, and guessing at a mapping would hide
+            // that rather than report it.
+            let DbResult::Query(statements) = res else {
+                return Err(string_t::from(
+                    "query returned a non-query result; this is a library bug",
+                ));
+            };
+
+            let acc: Vec<crate::result::ArrayResult> = statements
+                .into_iter()
+                .map(|st| match st.result {
+                    // A statement yielding an array keeps its shape; a scalar is
+                    // wrapped in a one-element array, matching sr_query so a
+                    // caller can read both the same way.
+                    Ok(sdbValue::Array(arr)) => {
+                        crate::result::ArrayResult::ok(arr.into())
+                    }
+                    Ok(val) => {
+                        let arr: crate::array::Array =
+                            vec![crate::value::Value::from(val)].into();
+                        crate::result::ArrayResult::ok(arr)
+                    }
+                    Err(e) => crate::result::ArrayResult::err(e.to_string()),
+                })
+                .collect();
+
+            let ArrayGen { ptr, len } = acc.make_array();
+            unsafe { res_ptr.write(ptr) }
+            Ok(len)
+        })
+    }
+
     /// Get a stream for receiving live query notifications
     ///
     /// # Safety
@@ -445,6 +554,21 @@ impl SurrealRpc {
             return;
         }
         let boxed = unsafe { Box::from_raw(ctx) };
+
+        // Retire the live queries this context registered before the datastore
+        // goes with it. Core never calls `cleanup_all_lqs` -- it is the
+        // transport's to invoke at shutdown -- and while our datastore normally
+        // dies here anyway, that stops being true the moment a constructor
+        // shares one. Doing it here means the hook is correct in both cases.
+        //
+        // Best effort by construction: a failure has no caller to report to,
+        // and the teardown must not be blocked by it.
+        let rt = boxed.rt.handle().clone();
+        rt.block_on(async {
+            let inner = boxed.inner.read().await;
+            inner.cleanup_all_lqs().await;
+        });
+
         drop(boxed)
     }
 }

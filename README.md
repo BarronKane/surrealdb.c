@@ -57,7 +57,9 @@ sr_surreal_disconnect(db);
 
 Calls return a negative status on failure — `SR_ERROR`, `SR_CLOSED` or
 `SR_FATAL` — and write a message to `err_ptr` for the caller to release with
-`sr_string_free`. Passing `NULL` for `err_ptr` discards the message. Anything a
+`sr_string_free`. The sign carries the meaning: positive is a result, `SR_NONE`
+(zero) means nothing was available and the call is worth repeating, and negative
+means stop. Notification streams report their end with `SR_CLOSED`. Passing `NULL` for `err_ptr` discards the message. Anything a
 `sr_*_new` or `sr_value_*` constructor hands back is released by the matching
 `sr_*_free`.
 

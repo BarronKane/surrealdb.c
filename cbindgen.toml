@@ -11,14 +11,18 @@ after_includes = """
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
-#define SR_TIMEOUT -4
 """
 
 [export]
 prefix = "sr_"
-exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_TIMEOUT"]
+exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
 
 
+# Hand-maintained, so it drifts: a type added without an entry here keeps its
+# Rust name and ships as e.g. `sr_RpcStream`. The rule is "no CamelCase in the
+# public header" rather than "always _t" -- sr_g_coord, sr_action and the
+# credentials types are deliberately unsuffixed below. `header_has_no_rust_type_names`
+# in c-tests fails the build if a new type slips through.
 [export.rename]
 "Duration" = "duration_t"
 "Number" = "number_t"
@@ -37,6 +41,8 @@ exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_TIMEOUT"]
 "Action" = "action"
 "BTreeMap_String__Value" = "opaque_object_internal_t"
 "Stream" = "stream_t"
+"RpcStream" = "rpc_stream_t"
+"SurrealError" = "error_t"
 "Surreal" = "surreal_t"
 "SurrealRpc" = "surreal_rpc_t"
 "ArrayResult" = "arr_res_t"
