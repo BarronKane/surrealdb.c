@@ -9,10 +9,13 @@
 #define SR_ERROR -2
 #define SR_FATAL -3
 
+/* Worker threads a context takes when sr_option_t.worker_threads is 0. */
+#define SR_DEFAULT_WORKER_THREADS 4
+
 #define SR_VERSION_MAJOR 0
 #define SR_VERSION_MINOR 3
-#define SR_VERSION_PATCH 1
-#define SR_VERSION_STRING "0.3.1"
+#define SR_VERSION_PATCH 2
+#define SR_VERSION_STRING "0.3.2"
 
 /* Compare against SR_VERSION_ENCODE(1, 2, 0) and friends. */
 #define SR_VERSION_ENCODE(major, minor, patch) \
@@ -247,6 +250,64 @@ typedef struct sr_option_t {
    * before enabling it on hardware the end user controls.
    */
   const char *session_dir;
+  /**
+   * Tokio worker threads. Zero means the library default (see
+   * `SR_DEFAULT_WORKER_THREADS`), not the core count.
+   */
+  int worker_threads;
+  /**
+   * Run the whole runtime on one thread. Not a count but a mode: the
+   * scheduler itself is single-threaded, which is the genuinely slim option
+   * for intermittent workloads. Overrides `worker_threads` when set.
+   */
+  bool current_thread;
+  /**
+   * Ceiling on lazily-spawned blocking threads. Zero means tokio's default
+   * of 512. This is a cap, not residency -- they spawn on demand and retire
+   * after `thread_keep_alive_ms`.
+   */
+  int max_blocking_threads;
+  /**
+   * How long an idle blocking thread lingers, in milliseconds. Zero means
+   * tokio's default of 10s. Lower means less sawtooth after a burst.
+   */
+  int thread_keep_alive_ms;
+  /**
+   * Stack size per worker thread, in bytes. Zero means the platform default,
+   * which on Linux reserves 8 MiB of address space per thread.
+   */
+  int thread_stack_size;
+  /**
+   * Skip the IO driver. Zero-cost for an embedded-only context, but it is
+   * what `http://` and `ws://` endpoints -- and SurrealQL's `http::*`
+   * functions -- are built on, so setting this on a context that reaches the
+   * network makes those fail. Off by default for that reason.
+   */
+  bool disable_io;
+  /**
+   * Directory for temporary files, or null for the platform default.
+   *
+   * The platform temp directory is not always the right answer, or writable
+   * at all, on console and mobile targets, and a host application usually
+   * has its own sanctioned scratch location.
+   */
+  const char *temporary_directory;
+  /**
+   * Log queries slower than this many milliseconds. Zero disables it.
+   *
+   * Ignored by `sr_connect_with_options`, which does not build the datastore
+   * directly.
+   *
+   * # Slow-query logs include bound parameters
+   *
+   * SurrealDB logs the statement *and its parameters*, and parameters are
+   * how credentials travel -- a `signin` carries its password as one. The
+   * log goes wherever the host application's `tracing` subscriber points,
+   * which on a client machine may be a file that outlives the process.
+   * Treat enabling this as a decision about credential handling, not just
+   * verbosity.
+   */
+  int slow_log_ms;
 } sr_option_t;
 
 /**
@@ -667,6 +728,30 @@ typedef struct sr_credentials_access {
   sr_string_t database;
   sr_string_t access;
 } sr_credentials_access;
+
+/**
+ * Process-wide settings, applied once before any connection is opened.
+ *
+ * Separate from `sr_option_t` because the lifetime is different. A per-context
+ * field carrying a process-global setting is a trap: the second context's
+ * value is silently ignored, and nothing at the call site says so.
+ */
+typedef struct sr_runtime_options_t {
+  /**
+   * Size of SurrealDB's shared blocking pool. Zero leaves it alone.
+   *
+   * The default is one worker per core on hosts with 16 or more cores, and
+   * 16 below that -- so a 32-core machine spends 32 threads here before a
+   * single query runs, and an 8-core one still spends 16. Worse for a host
+   * application, the default *pins* one worker per core when the size equals
+   * the core count and that count is at least 16, which fights an engine
+   * that manages its own affinity. Any value that differs from the core
+   * count drops pinning, so setting this is worth doing for that alone.
+   *
+   * Clamped to a minimum of 4 by SurrealDB itself.
+   */
+  int kvs_threadpool_size;
+} sr_runtime_options_t;
 
 typedef struct sr_notification_t {
   struct sr_uuid_t query_id;
@@ -1730,6 +1815,29 @@ int sr_use_ns(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *n
  * ```
  */
 int sr_version(const struct sr_surreal_t *db, sr_string_t *err_ptr, sr_string_t *res_ptr);
+
+/**
+ * Apply process-wide settings. Call once, before opening any connection.
+ *
+ * Returns 1 when the settings were applied, `SR_NONE` when there was nothing
+ * to do, and `SR_ERROR` with a message when a value is rejected.
+ *
+ * # This is not idempotent, and cannot be
+ *
+ * SurrealDB's blocking pool is built once per process, on first use, from an
+ * environment variable read behind a `LazyLock`. So this must run before the
+ * first `sr_connect*` or `sr_surreal_rpc_new` call. Afterwards it has no
+ * effect -- and, because the pool is already built, no way to report that it
+ * had none. Calling it first is the caller's side of the bargain; the
+ * alternative was a per-context field that lies on every context after the
+ * first.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `opts` must be a valid pointer to a `sr_runtime_options_t`, or null (no-op)
+ */
+int sr_runtime_init(sr_string_t *err_ptr, const struct sr_runtime_options_t *opts);
 
 int sr_surreal_rpc_new(sr_string_t *err_ptr,
                        struct sr_surreal_rpc_t **surreal_ptr,

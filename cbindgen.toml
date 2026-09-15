@@ -11,11 +11,14 @@ after_includes = """
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
+
+/* Worker threads a context takes when sr_option_t.worker_threads is 0. */
+#define SR_DEFAULT_WORKER_THREADS 4
 """
 
 [export]
 prefix = "sr_"
-exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
+exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_DEFAULT_WORKER_THREADS"]
 
 
 # Hand-maintained, so it drifts: a type added without an entry here keeps its
@@ -64,6 +67,7 @@ exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"]
 "ArrayGen_sr_g_polygon" = "g_polygon_arr_t"
 "ArrayGen_sr_geometry" = "geometry_arr_t"
 "Options" = "option_t"
+"RuntimeOptions" = "runtime_options_t"
 "Toggle" = "toggle_t"
 "TargetMode" = "target_mode_t"
 "TargetSet" = "targets_t"

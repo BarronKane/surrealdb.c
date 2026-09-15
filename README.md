@@ -100,6 +100,73 @@ skipped, so a typo cannot quietly widen or narrow the sandbox.
 The experimental features are opted into the same way — `"gql"` is required by
 the `gql` and `graphql` RPC methods, and `"files"` by `file://` values.
 
+## Thread footprint
+
+A database embedded in someone else's process should not claim every core, so
+since 0.3.2 it does not. One `mem://` context on a 32-core host:
+
+```
+0.3.1                       68 threads   (32 tokio + 32 KVS + 4)
+0.3.2 defaults              40 threads   (4 tokio  + 32 KVS + 4)
+  + sr_runtime_init(pool 4) 12 threads
+  + current_thread           8 threads
+```
+
+Sessions are free: three `sr_rpc_session_attach` calls leave residency
+unchanged. The cost is per context.
+
+Two settings, in two places, because the lifetimes differ.
+
+### Per context — `sr_option_t`
+
+```c
+sr_option_t opts = {0};
+opts.worker_threads = 2;        // 0 = SR_DEFAULT_WORKER_THREADS (4), not core count
+opts.current_thread = true;     // a mode, not a count: the slimmest option
+opts.max_blocking_threads = 8;  // a cap on lazily-spawned threads, not residency
+opts.thread_keep_alive_ms = 500;// how fast burst threads retire
+opts.thread_stack_size = 0;     // bytes; Linux reserves 8 MiB per thread by default
+opts.disable_io = false;        // see below
+opts.temporary_directory = "/path/for/scratch";
+opts.slow_log_ms = 0;           // see the warning in the header before enabling
+```
+
+`disable_io` drops tokio's IO driver, which an embedded-only context never
+needs — but it is also what `http://` and `ws://` endpoints and SurrealQL's
+`http::*` functions are built on, so it is off by default.
+
+`temporary_directory` matters beyond tidiness: the platform temp directory is
+not always writable, or correct, on console and mobile targets.
+
+### Per process — `sr_runtime_init`
+
+SurrealDB's blocking pool is built **once per process**, on first use. A
+per-context field would be honoured for the first context and silently ignored
+for every later one, so it lives on its own call:
+
+```c
+sr_runtime_options_t rt = {0};
+rt.kvs_threadpool_size = 4;     // minimum 4, enforced by SurrealDB
+sr_runtime_init(&err, &rt);     // BEFORE any sr_connect* or sr_surreal_rpc_new
+```
+
+Call it first or not at all — afterwards the pool exists and there is no way
+for it to report that it had no effect.
+
+Two reasons this is worth setting even if the count seems fine:
+
+- **The default pins one worker per core**, whenever the resolved size equals
+  the core count and that count is at least 16 — the default path on any modern
+  desktop. Inside a game engine, which manages its own affinity, that is
+  actively unhelpful. **Any** explicit value that differs from the core count
+  drops pinning, so setting this is worth doing for that alone.
+- **The floor is 16, not the core count.** A host with fewer than 16 cores still
+  takes 16 threads here, so the defaults get relatively worse as the machine
+  gets smaller.
+
+`SURREAL_KVS_THREADPOOL_SIZE` does the same thing if you would rather configure
+it from the environment.
+
 ## Sessions
 
 An RPC context (`sr_surreal_rpc_new`) carries a session map. Since SurrealDB 3.1

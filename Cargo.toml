@@ -1,6 +1,6 @@
 [package]
 name = "surrealdb_c"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["Tobie Morgan Hitchcock <tobie@surrealdb.com>"]
 description = "The official SurrealDB SDK for C"
@@ -20,6 +20,12 @@ surrealdb = { version = "3.2.4", features = [
     "kv-mem",
     "protocol-http",
 ] }
+# NOTE: core's default set includes `graphql`, which pulls async-graphql (~22
+# crates, ~16 MB of static archive). It is NOT dead weight: `sr_rpc_execute_on`
+# exposes the `graphql` RPC method and Session/GraphqlDispatchesToTheEngine
+# covers it. Turning it off is a capability trade, not a free win, so defaults
+# stay on until that call is made. `gql` is a separate, empty feature gating
+# the plan executor -- unrelated to GraphQL despite the name.
 surrealdb-core = { version = "3.2.4", features = [
     "http",
     "gql",

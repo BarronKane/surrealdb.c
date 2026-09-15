@@ -180,8 +180,9 @@ impl Surreal {
                 return Err("invalid utf8".into());
             };
 
-            let Ok(rt) = Runtime::new() else {
-                return Err("error creating runtime".into());
+            let rt = match Options::build_runtime(options.as_ref()) {
+                Ok(rt) => rt,
+                Err(e) => return Err(string_t::from(e)),
             };
 
             // Without options this stays exactly as it was: a bare endpoint,
@@ -199,6 +200,9 @@ impl Surreal {
                         config = config.transaction_timeout(std::time::Duration::from_secs(
                             opts.transaction_timeout as u64,
                         ));
+                    }
+                    if let Some(dir) = opts.temporary_directory_path() {
+                        config = config.temporary_directory(Some(dir));
                     }
                     match opts.capabilities.to_capabilities() {
                         // The SDK wraps the core type; the conversion is

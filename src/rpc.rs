@@ -51,8 +51,9 @@ impl SurrealRpc {
                 return Err("Invalid UTF-8".into());
             };
 
-            let Ok(rt) = Runtime::new() else {
-                return Err("error creating runtime".into());
+            let rt = match Options::build_runtime(Some(&options)) {
+                Ok(rt) => rt,
+                Err(e) => return Err(string_t::from(e)),
             };
 
             // As of SurrealDB 3.1, the caller owns the notification channel: the
@@ -85,6 +86,27 @@ impl SurrealRpc {
                     options.transaction_timeout as u64,
                 )))
             }
+            if let Some(dir) = options.temporary_directory_path() {
+                builder = builder.with_temporary_directory(Some(dir));
+            }
+            if options.slow_log_ms > 0 {
+                // Both filter lists are empty, which is upstream's "log every
+                // parameter" setting. That is deliberate rather than overlooked:
+                // the alternative is an allowlist, and this library cannot know
+                // a caller's parameter names. The exposure is documented on the
+                // option instead, where the caller deciding to switch it on will
+                // read it.
+                builder = builder.with_slow_log(
+                    Duration::from_millis(options.slow_log_ms as u64),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
+            // Not a control, a hint: it sizes the permit cap for inline blocking
+            // work, and upstream's own guidance is that an embedder building its
+            // own runtime should pass what it gave the tokio builder. Inert
+            // while RocksDB is disabled, but free to keep honest.
+            builder = builder.with_runtime_worker_threads(rt.handle().metrics().num_workers());
 
             let kvs = match rt.block_on(builder.build_with_path(endpoint)) {
                 Ok(db) => Arc::new(db),

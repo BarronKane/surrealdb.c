@@ -155,6 +155,154 @@ TEST(Options, TargetModesAreAccepted) {
     sr_surreal_disconnect(db);
 }
 
+static void rm_rf_sessions(const char *dir);
+
+/* ------------------------------------------------- runtime footprint */
+
+#if defined(__linux__)
+#include <stdio.h>
+#include <unistd.h>
+static int thread_count(void) {
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return -1;
+    int n = 0; struct dirent *e;
+    while ((e = readdir(d))) if (e->d_name[0] != '.') n++;
+    closedir(d);
+    return n;
+}
+#endif
+
+/*
+ * A context must not claim a worker per core.
+ *
+ * Until 0.3.2 the runtime was `Runtime::new()`, which is one tokio worker per
+ * core -- 32 on the machine this was written on, for a database the host uses
+ * intermittently. No Rust consumer meets that default because they bring their
+ * own runtime; it existed only because the C boundary had to invent one and
+ * inherited a server's shape.
+ *
+ * Thread residency is the whole point of the change, so it is asserted directly
+ * rather than trusting that the builder was called.
+ */
+TEST(Options, DefaultRuntimeDoesNotScaleWithCores) {
+#if defined(__linux__)
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores < 8) {
+        TEST_IGNORE_MESSAGE("needs a host with enough cores for the old default to differ");
+    }
+
+    int before = thread_count();
+    sr_option_t opts = {0};
+    sr_surreal_rpc_t *rpc = NULL;
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) { sr_string_free(err); err = NULL; }
+        TEST_FAIL_MESSAGE("rpc context should be created");
+    }
+    int after = thread_count();
+    sr_surreal_rpc_disconnect(rpc);
+
+    int added = after - before;
+    /* The KVS pool is process-global and sized elsewhere, so this bounds the
+       total rather than the tokio pool alone: the assertion is simply that
+       residency no longer tracks the core count. */
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "a context added %d threads on a %ld-core host; it should not scale with cores",
+             added, cores);
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE((int)cores * 2, added, msg);
+#else
+    TEST_IGNORE_MESSAGE("thread residency is checked on Linux only");
+#endif
+}
+
+/* A single-threaded runtime is a mode, not a count, and it must still work. */
+TEST(Options, CurrentThreadRuntimeStillServesQueries) {
+    sr_option_t opts = {0};
+    opts.current_thread = true;
+
+    sr_surreal_rpc_t *rpc = NULL;
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) { sr_string_free(err); err = NULL; }
+        TEST_FAIL_MESSAGE("a current_thread context should be created");
+    }
+
+    sr_uuid_t id = {{0}};
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_rpc_query_on(rpc, &err, &res, &id, "RETURN 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n,
+        "a single-threaded runtime must still run queries");
+    sr_arr_res_arr_free(res, n);
+
+    if (err) { sr_string_free(err); err = NULL; }
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/* An explicit worker count is honoured rather than ignored. */
+TEST(Options, ExplicitWorkerCountConnects) {
+    sr_option_t opts = {0};
+    opts.worker_threads = 2;
+    opts.thread_keep_alive_ms = 500;
+    opts.max_blocking_threads = 8;
+
+    sr_surreal_rpc_t *rpc = NULL;
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) { sr_string_free(err); err = NULL; }
+        TEST_FAIL_MESSAGE("an explicitly sized context should be created");
+    }
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/* A negative count is a caller error, not a silent clamp. */
+TEST(Options, NegativeWorkerCountIsRejected) {
+    sr_option_t opts = {0};
+    opts.worker_threads = -1;
+
+    sr_surreal_rpc_t *rpc = NULL;
+    int rc = sr_surreal_rpc_new(&err, &rpc, "memory", opts);
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE(0, rc, "a negative worker count should fail");
+    if (err) { sr_string_free(err); err = NULL; }
+}
+
+/*
+ * sr_runtime_init is the process-global half. It is separate from sr_option_t
+ * because the KVS pool is built once per process: a per-context field would be
+ * honoured for the first context and silently ignored for every later one.
+ */
+TEST(Options, RuntimeInitValidatesItsInput) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, sr_runtime_init(&err, NULL),
+        "a null options pointer is a no-op, not an error");
+
+    sr_runtime_options_t ro = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, sr_runtime_init(&err, &ro),
+        "an all-zero struct asks for nothing");
+
+    ro.kvs_threadpool_size = -1;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ERROR, sr_runtime_init(&err, &ro),
+        "a negative pool size should be rejected");
+    TEST_ASSERT_NOT_NULL(err);
+    if (err) { sr_string_free(err); err = NULL; }
+
+    ro.kvs_threadpool_size = 4;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_runtime_init(&err, &ro),
+        "a valid pool size should be applied");
+}
+
+/* A caller-supplied temporary directory is accepted on the RPC path. */
+TEST(Options, TemporaryDirectoryIsAccepted) {
+    sr_option_t opts = {0};
+    opts.temporary_directory = "surrealdb_tmp_test";
+
+    sr_surreal_rpc_t *rpc = NULL;
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) { sr_string_free(err); err = NULL; }
+        TEST_FAIL_MESSAGE("a context with a temporary directory should be created");
+    }
+    sr_surreal_rpc_disconnect(rpc);
+    rm_rf_sessions("surrealdb_tmp_test");
+}
+
 /* ------------------------------------------------- session persistence */
 
 static void rm_rf_sessions(const char *dir) {
@@ -315,6 +463,12 @@ TEST_GROUP_RUNNER(Options) {
     RUN_TEST_CASE(Options, BadCapabilityNameIsReported);
     RUN_TEST_CASE(Options, DenyOverridesAllowForRpcMethods);
     RUN_TEST_CASE(Options, TargetModesAreAccepted);
+    RUN_TEST_CASE(Options, DefaultRuntimeDoesNotScaleWithCores);
+    RUN_TEST_CASE(Options, CurrentThreadRuntimeStillServesQueries);
+    RUN_TEST_CASE(Options, ExplicitWorkerCountConnects);
+    RUN_TEST_CASE(Options, NegativeWorkerCountIsRejected);
+    RUN_TEST_CASE(Options, RuntimeInitValidatesItsInput);
+    RUN_TEST_CASE(Options, TemporaryDirectoryIsAccepted);
     RUN_TEST_CASE(Options, SessionsPersistAcrossContexts);
     RUN_TEST_CASE(Options, PersistenceIsOffWithoutADirectory);
 }
