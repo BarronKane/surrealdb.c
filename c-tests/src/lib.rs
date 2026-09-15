@@ -183,7 +183,7 @@ mod header_contract {
     #[test]
     fn status_codes_are_defined() {
         let src = header();
-        for m in ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL"] {
+        for m in ["SR_AGAIN", "SR_CLOSED", "SR_ERROR", "SR_FATAL"] {
             assert!(
                 src.contains(&format!("#define {m} ")),
                 "{m} should be defined in the header"
@@ -193,6 +193,14 @@ mod header_contract {
         // sr_, which is how sr_SR_ERROR and sr_sr_toggle_t both happened.
         assert!(!src.contains("sr_SR_"), "double-prefixed constant in the header");
         assert!(!src.contains("sr_sr_"), "double-prefixed type in the header");
+
+        // SR_NONE was retired in 0.3.2. It meant "ended" until 0.3.0 and then
+        // "nothing yet", so leaving the spelling defined would let code written
+        // against either meaning keep compiling against the other.
+        assert!(
+            !src.contains("SR_NONE"),
+            "SR_NONE is retired; the zero return is SR_AGAIN"
+        );
     }
 
     /// No Rust type name may reach the public header.

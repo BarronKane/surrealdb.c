@@ -595,6 +595,20 @@ impl SurrealRpc {
     }
 }
 
+/// The live-query id in a `kill` request parameter, if it is one.
+///
+/// Accepts both shapes a client can send: a real uuid value, and the string a
+/// hand-rolled CBOR encoder is likely to produce. Anything else is not an id we
+/// can act on, and guessing would be worse than leaving the entry to
+/// `cleanup_lqs`.
+fn live_query_id_of(v: &sdbValue) -> Option<uuid::Uuid> {
+    match v {
+        sdbValue::Uuid(u) => Some(u.into_inner()),
+        sdbValue::String(s) => uuid::Uuid::parse_str(s).ok(),
+        _ => None,
+    }
+}
+
 fn parse_cbor_request(value: &ciborium::Value) -> Result<(String, surrealdb::types::Array), string_t> {
     let map = value.as_map().ok_or(string_t::from("Expected CBOR map for RPC request"))?;
     
@@ -745,6 +759,24 @@ async fn run_rpc(
     // is inert and this costs nothing.
     let client_session = inner.persist_sessions_enabled().then_some(session);
 
+    // TODO(upstream, unfiled): bandaid for `handle_kill` never firing.
+    //
+    // `KILL` resolves to `NONE`, so core's `QueryType::Kill` dispatch -- which
+    // requires a uuid result -- never matches and the trait hook is never
+    // called. See the note on `SurrealRpcInner::handle_kill`.
+    //
+    // The `kill` method carries the id in its own params, so for that route the
+    // id is already in hand and no guessing is involved. Captured before the
+    // call because `execute` consumes `params`.
+    //
+    // Remove this whole block when the upstream fix lands: the hook will fire
+    // on its own and this becomes a second, silent path doing the same work.
+    let killed_lqid = if matches!(method, Method::Kill) {
+        params.iter().next().and_then(live_query_id_of)
+    } else {
+        None
+    };
+
     let res = <SurrealRpcInner as RpcProtocol>::execute(
         inner,
         None,
@@ -755,6 +787,13 @@ async fn run_rpc(
     )
     .await
     .map_err(|e| string_t::from(e.to_string()))?;
+
+    // Only after a successful call. `kill` propagates a statement error, so an
+    // `Ok` here means the subscription really is gone; pruning on failure would
+    // drop an entry we still own and still need to clean up later.
+    if let Some(lqid) = killed_lqid {
+        inner.handle_kill(&lqid).await;
+    }
 
     // Every DbResult variant is encoded, not just `Other`. `query` and `gql`
     // return `DbResult::Query`, so matching on `Other` alone made them
@@ -1074,5 +1113,36 @@ impl SurrealRpcInner {
     fn session_path(&self, id: &uuid::Uuid) -> Option<std::path::PathBuf> {
         let dir = self.session_dir.as_ref()?;
         Some(dir.join(format!("{id}.session.json")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The extraction is the only part of the `kill` bandaid that can be wrong
+    /// in a quiet way: the plumbing either prunes an entry or does not, but a
+    /// mis-parse would prune the wrong id, or none, with nothing to show for
+    /// it. Both accepted shapes are pinned, and so is the refusal to guess.
+    #[test]
+    fn live_query_id_is_read_from_either_shape() {
+        let id = uuid::Uuid::new_v4();
+
+        let as_uuid = sdbValue::Uuid(surrealdb::types::Uuid::from(id));
+        assert_eq!(live_query_id_of(&as_uuid), Some(id));
+
+        // What a hand-rolled CBOR encoder sends, which is how the C tests and
+        // most C callers will drive this.
+        let as_text = sdbValue::String(id.to_string());
+        assert_eq!(live_query_id_of(&as_text), Some(id));
+
+        // Anything else is not an id. Guessing would prune an entry we still
+        // own, which is worse than leaving it to cleanup_lqs.
+        assert_eq!(live_query_id_of(&sdbValue::String("nonsense".into())), None);
+        assert_eq!(live_query_id_of(&sdbValue::None), None);
+        assert_eq!(
+            live_query_id_of(&sdbValue::Number(surrealdb::types::Number::Int(7))),
+            None
+        );
     }
 }

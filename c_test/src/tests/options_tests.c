@@ -271,11 +271,11 @@ TEST(Options, NegativeWorkerCountIsRejected) {
  * honoured for the first context and silently ignored for every later one.
  */
 TEST(Options, RuntimeInitValidatesItsInput) {
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, sr_runtime_init(&err, NULL),
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, sr_runtime_init(&err, NULL),
         "a null options pointer is a no-op, not an error");
 
     sr_runtime_options_t ro = {0};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, sr_runtime_init(&err, &ro),
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, sr_runtime_init(&err, &ro),
         "an all-zero struct asks for nothing");
 
     ro.kvs_threadpool_size = -1;

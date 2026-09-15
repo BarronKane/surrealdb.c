@@ -10,6 +10,9 @@
 
 #include "unity_fixture.h"
 #include "surrealdb.h"
+#if defined(__linux__)
+#include <dirent.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -389,7 +392,141 @@ TEST(Session, PingSucceeds) {
     if (res) sr_byte_arr_free(res, n);
 }
 
+/*
+ * A forked session has its own state and shares the engine.
+ *
+ * Until 0.3.2 sessions existed only on the RPC context, so the typed calls --
+ * sr_query, sr_select and the rest -- could not be used per-user at all. A
+ * caller wanting isolation had to give up the typed surface and hand-encode
+ * CBOR. sr_session_fork closes that: the SDK's own model is one handle per
+ * session over a shared engine, and this exposes it.
+ *
+ * Isolation is asserted through variables because they are the cheapest thing
+ * that is unambiguously per-session.
+ */
+TEST(Session, ForkIsolatesSessionState) {
+    sr_string_t e = NULL;
+    sr_surreal_t *a = NULL;
+    if (sr_connect(&e, &a, "mem://") < 0) {
+        if (e) sr_string_free(e);
+        TEST_FAIL_MESSAGE("connect should succeed");
+    }
+    sr_use_ns(a, &e, "t"); sr_use_db(a, &e, "t");
+
+    sr_surreal_t *b = NULL;
+    if (sr_session_fork(a, &e, &b) < 0) {
+        if (e) sr_string_free(e);
+        sr_surreal_disconnect(a);
+        TEST_FAIL_MESSAGE("forking a session should succeed");
+    }
+    TEST_ASSERT_NOT_NULL(b);
+
+    /* Namespace and database are inherited, so the fork is usable at once. */
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(b, &e, &res, "RETURN 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n, "a fork should inherit ns/db and run");
+    sr_arr_res_arr_free(res, n);
+
+    /* Variables are not shared. */
+    res = NULL;
+    n = sr_query(a, &e, &res, "LET $who = 'alice'; RETURN $who;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(1, n);
+    sr_arr_res_arr_free(res, n);
+
+    res = NULL;
+    n = sr_query(b, &e, &res, "RETURN $who;", NULL);
+    if (n > 0) {
+        const sr_value_t *v = sr_array_len(&res[0].ok) > 0 ? sr_array_get(&res[0].ok, 0) : NULL;
+        int leaked = (v != NULL && v->tag == SR_VALUE_STRAND);
+        sr_arr_res_arr_free(res, n);
+        TEST_ASSERT_FALSE_MESSAGE(leaked, "a fork must not see the parent's variables");
+    } else {
+        /* An unset parameter is an error rather than NONE; also isolation. */
+        if (e) { sr_string_free(e); e = NULL; }
+    }
+
+    /* Writes go to the same engine: one database, many sessions. */
+    res = NULL;
+    n = sr_query(a, &e, &res, "CREATE shared:1 SET v = 1;", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+
+    res = NULL;
+    n = sr_query(b, &e, &res, "SELECT * FROM shared;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "a fork shares the engine, so it sees the parent's writes");
+    sr_arr_res_arr_free(res, n);
+
+    if (e) sr_string_free(e);
+    sr_surreal_disconnect(b);
+    sr_surreal_disconnect(a);
+}
+
+/* A fork is a session, not a connection: no engine, no runtime, no threads. */
+TEST(Session, ForkCostsNoThreads) {
+#if defined(__linux__)
+    sr_string_t e = NULL;
+    sr_surreal_t *a = NULL;
+    if (sr_connect(&e, &a, "mem://") < 0) {
+        if (e) sr_string_free(e);
+        TEST_FAIL_MESSAGE("connect should succeed");
+    }
+
+    DIR *d = opendir("/proc/self/task");
+    int before = 0; struct dirent *ent;
+    while ((ent = readdir(d))) if (ent->d_name[0] != '.') before++;
+    closedir(d);
+
+    sr_surreal_t *forks[4] = {0};
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_session_fork(a, &e, &forks[i]));
+    }
+
+    d = opendir("/proc/self/task");
+    int after = 0;
+    while ((ent = readdir(d))) if (ent->d_name[0] != '.') after++;
+    closedir(d);
+
+    for (int i = 0; i < 4; i++) sr_surreal_disconnect(forks[i]);
+    if (e) sr_string_free(e);
+    sr_surreal_disconnect(a);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(before, after,
+        "four forked sessions should add no threads");
+#else
+    TEST_IGNORE_MESSAGE("thread residency is checked on Linux only");
+#endif
+}
+
+/* The parent can be freed first; the engine outlives it. */
+TEST(Session, ForkOutlivesItsParent) {
+    sr_string_t e = NULL;
+    sr_surreal_t *a = NULL;
+    if (sr_connect(&e, &a, "mem://") < 0) {
+        if (e) sr_string_free(e);
+        TEST_FAIL_MESSAGE("connect should succeed");
+    }
+    sr_use_ns(a, &e, "t"); sr_use_db(a, &e, "t");
+
+    sr_surreal_t *b = NULL;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_session_fork(a, &e, &b));
+
+    sr_surreal_disconnect(a);
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(b, &e, &res, "RETURN 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n,
+        "a fork must keep working after its parent is freed");
+    sr_arr_res_arr_free(res, n);
+
+    if (e) sr_string_free(e);
+    sr_surreal_disconnect(b);
+}
+
 TEST_GROUP_RUNNER(Session) {
+    RUN_TEST_CASE(Session, ForkIsolatesSessionState);
+    RUN_TEST_CASE(Session, ForkCostsNoThreads);
+    RUN_TEST_CASE(Session, ForkOutlivesItsParent);
     RUN_TEST_CASE(Session, DefaultExists);
     RUN_TEST_CASE(Session, AttachGeneratesAnId);
     RUN_TEST_CASE(Session, AttachHonoursACallerId);

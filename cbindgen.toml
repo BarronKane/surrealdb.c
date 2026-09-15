@@ -7,7 +7,7 @@ pragma_once = true
 # SR_ERROR. export.rename does not apply to constants, so exclusion plus an
 # explicit definition is the way to keep the two in agreement.
 after_includes = """
-#define SR_NONE 0
+#define SR_AGAIN 0
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
@@ -18,7 +18,7 @@ after_includes = """
 
 [export]
 prefix = "sr_"
-exclude = ["SR_NONE", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_DEFAULT_WORKER_THREADS"]
+exclude = ["SR_AGAIN", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_DEFAULT_WORKER_THREADS"]
 
 
 # Hand-maintained, so it drifts: a type added without an entry here keeps its

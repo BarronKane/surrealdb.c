@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-#define SR_NONE 0
+#define SR_AGAIN 0
 #define SR_CLOSED -1
 #define SR_ERROR -2
 #define SR_FATAL -3
@@ -1212,28 +1212,94 @@ int sr_relate(const struct sr_surreal_t *db,
 int sr_invalidate(const struct sr_surreal_t *db, sr_string_t *err_ptr);
 
 /**
+ * Fork a session from this connection.
+ *
+ * Writes a new `sr_surreal_t` to `out` that talks to the same engine over
+ * the same runtime, but carries its own session state: its own `USE`
+ * namespace and database, its own `LET` variables, and its own
+ * authentication. Changing any of those on one handle does not touch the
+ * other.
+ *
+ * This is how to serve several independent users -- players, tenants,
+ * requests -- from one embedded database. It is not a second connection:
+ * no engine is started, no runtime is built, and no threads are added.
+ *
+ * A fork is freed with `sr_surreal_disconnect`, like any other handle. The
+ * engine goes away when the last handle does, in whatever order they are
+ * freed.
+ *
+ * # Poisoning is shared, on purpose
+ *
+ * If any handle reports SR_FATAL the engine is gone, so every handle
+ * derived from it is poisoned too. The alternative -- poisoning only the
+ * handle that happened to make the failing call -- would leave the others
+ * looking healthy while talking to a dead engine.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `out` must be a valid pointer to receive the new connection
+ */
+int sr_session_fork(const struct sr_surreal_t *db, sr_string_t *err_ptr, struct sr_surreal_t **out);
+
+/**
+ * Fork a session and clear the state it inherited.
+ *
+ * As `sr_session_fork`, then `invalidate`, so the new handle starts with no
+ * authentication rather than the parent's. Its namespace and database are
+ * still inherited -- clearing those would leave a handle that cannot run
+ * anything until the caller picks them again, and `sr_use_ns` / `sr_use_db`
+ * are right there.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `out` must be a valid pointer to receive the new connection
+ */
+int sr_session_new(const struct sr_surreal_t *db, sr_string_t *err_ptr, struct sr_surreal_t **out);
+
+/**
  * Kill a live query by its UUID string
  *
- * Stops the live query in the datastore: no further changes are delivered
- * for it.
+ * Retires the live query in the datastore. **This is the only call that
+ * does**, and it is required: `sr_stream_kill` frees the local stream but
+ * leaves the subscription registered.
+ *
+ * # Tearing a live query down takes both calls
+ *
+ * ```c
+ * sr_kill(db, &err, query_id);   // retires the subscription
+ * sr_stream_kill(stream);        // frees the local reader
+ * ```
+ *
+ * Neither does the other's job, and the order between them does not
+ * matter. Measured with `INFO FOR TABLE`, which lists a table's `lives`:
+ * after `sr_stream_kill` alone the entry is still there; after `sr_kill`
+ * it is gone.
+ *
+ * `sr_stream_kill` does route a kill through the SDK, but it is spawned
+ * and its result is discarded, so it cannot be relied on -- and it is
+ * observably not happening on the version pinned here.
+ *
+ * # Getting the id is the hard part
+ *
+ * `sr_select_live` returns a stream and not the query id, and the SDK
+ * keeps its own copy private, so the only way to learn the id is to read
+ * it from `sr_notification_t.query_id` on the first notification. A live
+ * query that never fires therefore cannot be retired by id at all; it goes
+ * when the connection does.
+ *
+ * The alternative is to run `LIVE SELECT ...` through `sr_query`, which
+ * answers with the id -- but then there is no `sr_stream_t` to read from.
+ * Picking one of those is a real limitation, not a style choice.
  *
  * # This does not end an `sr_stream_t`
  *
  * A stream from `sr_select_live` goes quiet but stays open, and no
- * `SR_CLOSED` ever arrives -- see the TODO on `src/types/stream.rs` for why
- * (a core bug three layers up, not something this library can work around).
- * A reader polling that stream cannot tell "nothing happening right now"
- * from "this query is dead", and will keep waiting on a corpse.
- *
- * **To retire a stream, call `sr_stream_kill`.** That does stop the
- * underlying live query -- by a different route that the defect does not
- * touch -- and releases the stream in the same step. Reach for `sr_kill`
- * only for a live query registered some other way, such as a bare
- * `LIVE SELECT` run through `sr_query`, where no `sr_stream_t` exists to
- * be stranded.
- *
- * Note that `REMOVE TABLE` strands a stream the same way, so this is a
- * property of the path rather than of this function.
+ * `SR_CLOSED` arrives -- see the TODO on `src/types/stream.rs` (an upstream
+ * defect, fixed by surrealdb/surrealdb#7520). `REMOVE TABLE` strands a
+ * stream the same way, so that is a property of the path rather than of
+ * this function.
  *
  * # Safety
  *
@@ -1279,14 +1345,14 @@ int sr_kill(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *que
  * }
  *
  * Every wait is bounded, so a reader always gets control back. Loop on
- * SR_NONE and check whatever else the thread must stay responsive to.
+ * SR_AGAIN and check whatever else the thread must stay responsive to.
  *
  * sr_notification_t note;
  * while (running)
  * {
  *     int got = sr_stream_next_timeout(stream, &note, 250);
  *     if (got > 0) { sr_print_notification(&note); sr_notification_free(note); }
- *     else if (got == SR_NONE) continue;   // nothing yet
+ *     else if (got == SR_AGAIN) continue;  // nothing yet
  *     else break;                          // SR_CLOSED or an error
  * }
  * sr_stream_kill(stream);
@@ -1819,7 +1885,7 @@ int sr_version(const struct sr_surreal_t *db, sr_string_t *err_ptr, sr_string_t 
 /**
  * Apply process-wide settings. Call once, before opening any connection.
  *
- * Returns 1 when the settings were applied, `SR_NONE` when there was nothing
+ * Returns 1 when the settings were applied, `SR_AGAIN` when there was nothing
  * to do, and `SR_ERROR` with a message when a value is rejected.
  *
  * # This is not idempotent, and cannot be
@@ -2196,7 +2262,7 @@ void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
  *
  * Returns 1 and writes to `notification_ptr` when a notification is
  * received, SR_CLOSED when the stream has ended, and SR_ERROR on a stream
- * error. It never returns SR_NONE: a blocking call has nothing to report
+ * error. It never returns SR_AGAIN: a blocking call has nothing to report
  * until it has something.
  *
  * # Not recommended on surrealdb 3.2.4
@@ -2221,7 +2287,7 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
  * Get the next notification, waiting no longer than `timeout_ms`
  *
  * Returns 1 and writes to `notification_ptr` when a notification is
- * received, SR_NONE when the wait expired with the stream still open,
+ * received, SR_AGAIN when the wait expired with the stream still open,
  * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
  *
  * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
@@ -2241,9 +2307,9 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
  * `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
  * would have cost, and still returns.
  *
- * # SR_NONE is not SR_CLOSED
+ * # SR_AGAIN is not SR_CLOSED
  *
- * SR_NONE means nothing has arrived yet and the stream is still live, so
+ * SR_AGAIN means nothing has arrived yet and the stream is still live, so
  * call again. SR_CLOSED means the stream has ended and calling again is
  * pointless. Collapsing the two turns a merely slow notification into an
  * abandoned stream, or an ended stream into a spin.
@@ -2267,10 +2333,24 @@ int sr_stream_next_timeout(struct sr_stream_t *self,
                            int timeout_ms);
 
 /**
- * Kill and free a stream
+ * Free a stream
  *
- * Closes the stream and releases all associated resources.
- * The stream must not be used after calling this function.
+ * Releases the reader and its resources. The stream must not be used after
+ * calling this function.
+ *
+ * # This does not retire the live query
+ *
+ * Despite the name, the subscription stays registered in the datastore.
+ * Dropping the SDK stream does spawn a kill, but it is fire-and-forget with
+ * its result discarded, and on the pinned version the subscription is
+ * observably still listed by `INFO FOR TABLE` afterwards.
+ *
+ * Use `sr_kill` for that, and call both -- neither does the other's job:
+ *
+ * ```c
+ * sr_kill(db, &err, query_id);   // retires the subscription
+ * sr_stream_kill(stream);        // frees the local reader
+ * ```
  *
  * This runs on the runtime owned by the connection the stream was opened on,
  * so it must be called before `sr_surreal_disconnect` on that connection.
@@ -2296,7 +2376,7 @@ int sr_rpc_stream_next(struct sr_rpc_stream_t *self, uint8_t **res_ptr);
 /**
  * Get the next notification, waiting no longer than `timeout_ms`
  *
- * Returns the payload length and writes to `res_ptr` on success, SR_NONE
+ * Returns the payload length and writes to `res_ptr` on success, SR_AGAIN
  * when the wait expired with the channel still open, SR_CLOSED when the
  * sending half is gone, and SR_ERROR if the payload could not be encoded.
  *
@@ -2304,7 +2384,7 @@ int sr_rpc_stream_next(struct sr_rpc_stream_t *self, uint8_t **res_ptr);
  * `sr_rpc_stream_next`, zero polls once and returns immediately, and a
  * positive value waits up to that many milliseconds.
  *
- * SR_NONE means call again; SR_CLOSED means stop. An expired wait takes
+ * SR_AGAIN means call again; SR_CLOSED means stop. An expired wait takes
  * nothing off the channel, so a later notification is still delivered.
  *
  * Unlike `sr_stream_next_timeout` this does not touch a tokio runtime, which

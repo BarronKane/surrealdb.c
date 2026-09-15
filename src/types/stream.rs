@@ -77,7 +77,7 @@ use surrealdb::types::{Value as sdbValue, Notification as PublicNotification};
 use tokio::runtime::Handle;
 
 use crate::SR_ERROR;
-use crate::{notification::Notification, SR_CLOSED, SR_NONE};
+use crate::{notification::Notification, SR_CLOSED, SR_AGAIN};
 
 use super::array::MakeArray;
 
@@ -115,7 +115,7 @@ impl Stream {
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is
     /// received, SR_CLOSED when the stream has ended, and SR_ERROR on a stream
-    /// error. It never returns SR_NONE: a blocking call has nothing to report
+    /// error. It never returns SR_AGAIN: a blocking call has nothing to report
     /// until it has something.
     ///
     /// # Not recommended on surrealdb 3.2.4
@@ -145,7 +145,7 @@ impl Stream {
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is
-    /// received, SR_NONE when the wait expired with the stream still open,
+    /// received, SR_AGAIN when the wait expired with the stream still open,
     /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
     ///
     /// `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
@@ -165,9 +165,9 @@ impl Stream {
     /// `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
     /// would have cost, and still returns.
     ///
-    /// # SR_NONE is not SR_CLOSED
+    /// # SR_AGAIN is not SR_CLOSED
     ///
-    /// SR_NONE means nothing has arrived yet and the stream is still live, so
+    /// SR_AGAIN means nothing has arrived yet and the stream is still live, so
     /// call again. SR_CLOSED means the stream has ended and calling again is
     /// pointless. Collapsing the two turns a merely slow notification into an
     /// abandoned stream, or an ended stream into a spin.
@@ -210,7 +210,7 @@ impl Stream {
             Ok(Some(Ok(n))) => Self::deliver(n, notification_ptr),
             Ok(Some(Err(_))) => SR_ERROR,
             Ok(None) => SR_CLOSED,
-            Err(_elapsed) => SR_NONE,
+            Err(_elapsed) => SR_AGAIN,
         }
         })
     }
@@ -229,10 +229,24 @@ impl Stream {
         1
     }
 
-    /// Kill and free a stream
+    /// Free a stream
     ///
-    /// Closes the stream and releases all associated resources.
-    /// The stream must not be used after calling this function.
+    /// Releases the reader and its resources. The stream must not be used after
+    /// calling this function.
+    ///
+    /// # This does not retire the live query
+    ///
+    /// Despite the name, the subscription stays registered in the datastore.
+    /// Dropping the SDK stream does spawn a kill, but it is fire-and-forget with
+    /// its result discarded, and on the pinned version the subscription is
+    /// observably still listed by `INFO FOR TABLE` afterwards.
+    ///
+    /// Use `sr_kill` for that, and call both -- neither does the other's job:
+    ///
+    /// ```c
+    /// sr_kill(db, &err, query_id);   // retires the subscription
+    /// sr_stream_kill(stream);        // frees the local reader
+    /// ```
     ///
     /// This runs on the runtime owned by the connection the stream was opened on,
     /// so it must be called before `sr_surreal_disconnect` on that connection.
@@ -284,7 +298,7 @@ impl RpcStream {
 
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
-    /// Returns the payload length and writes to `res_ptr` on success, SR_NONE
+    /// Returns the payload length and writes to `res_ptr` on success, SR_AGAIN
     /// when the wait expired with the channel still open, SR_CLOSED when the
     /// sending half is gone, and SR_ERROR if the payload could not be encoded.
     ///
@@ -292,7 +306,7 @@ impl RpcStream {
     /// `sr_rpc_stream_next`, zero polls once and returns immediately, and a
     /// positive value waits up to that many milliseconds.
     ///
-    /// SR_NONE means call again; SR_CLOSED means stop. An expired wait takes
+    /// SR_AGAIN means call again; SR_CLOSED means stop. An expired wait takes
     /// nothing off the channel, so a later notification is still delivered.
     ///
     /// Unlike `sr_stream_next_timeout` this does not touch a tokio runtime, which
@@ -316,7 +330,7 @@ impl RpcStream {
             }
             let now = Instant::now();
             if now >= deadline {
-                return SR_NONE;
+                return SR_AGAIN;
             }
             std::thread::sleep(std::cmp::min(deadline - now, Duration::from_millis(1)));
         };

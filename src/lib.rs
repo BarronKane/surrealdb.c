@@ -10,6 +10,7 @@ use std::{
     future::IntoFuture,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
 };
 use stream::Stream;
 use string::string_t;
@@ -48,11 +49,17 @@ use crate::credentials::{credentials_scope, credentials_access};
 ///
 /// Returned by the bounded-wait calls when the wait expires. It is not an
 /// error and not an ending, which is why it is zero rather than negative.
-pub const SR_NONE: c_int = 0;
+///
+/// Named for `EAGAIN`, which is the same idea. It replaced `SR_NONE` in 0.3.2:
+/// that name had meant "the stream ended" until 0.3.0 and then kept its
+/// spelling while its meaning inverted, so `if (r == SR_NONE) break;` still
+/// compiled and silently became dead code. Retiring the name turns that into a
+/// compile error instead.
+pub const SR_AGAIN: c_int = 0;
 /// The source has ended. Calling again is pointless.
 ///
 /// Every stream reports its end this way. Until 0.3 `sr_stream_next` used
-/// SR_NONE for this while `sr_rpc_stream_next` used SR_CLOSED, so the same
+/// SR_AGAIN's value for this while `sr_rpc_stream_next` used SR_CLOSED, so the same
 /// condition had two encodings depending on which call you held.
 pub const SR_CLOSED: c_int = -1;
 pub const SR_ERROR: c_int = -2;
@@ -89,8 +96,13 @@ macro_rules! check_null {
 /// should be freed with sr_surreal_disconnect
 pub struct Surreal {
     db: sdbSurreal<Any>,
-    rt: Runtime,
-    ps: AtomicBool,
+    /// Shared with every session forked from this handle. One engine and one
+    /// runtime serve all of them; a fork is a session, not a connection.
+    rt: Arc<Runtime>,
+    /// Shared for the same reason, and deliberately: the engine dying is not a
+    /// property of the handle that happened to notice. A fork that poisons
+    /// poisons its siblings, because they are all talking to the same engine.
+    ps: Arc<AtomicBool>,
 }
 
 impl Surreal {
@@ -228,8 +240,8 @@ impl Surreal {
 
             Ok(Surreal {
                 db,
-                rt,
-                ps: AtomicBool::new(false),
+                rt: Arc::new(rt),
+                ps: Arc::new(AtomicBool::new(false)),
             })
         }));
 
@@ -887,28 +899,126 @@ impl Surreal {
         })
     }
 
+    /// Fork a session from this connection.
+    ///
+    /// Writes a new `sr_surreal_t` to `out` that talks to the same engine over
+    /// the same runtime, but carries its own session state: its own `USE`
+    /// namespace and database, its own `LET` variables, and its own
+    /// authentication. Changing any of those on one handle does not touch the
+    /// other.
+    ///
+    /// This is how to serve several independent users -- players, tenants,
+    /// requests -- from one embedded database. It is not a second connection:
+    /// no engine is started, no runtime is built, and no threads are added.
+    ///
+    /// A fork is freed with `sr_surreal_disconnect`, like any other handle. The
+    /// engine goes away when the last handle does, in whatever order they are
+    /// freed.
+    ///
+    /// # Poisoning is shared, on purpose
+    ///
+    /// If any handle reports SR_FATAL the engine is gone, so every handle
+    /// derived from it is poisoned too. The alternative -- poisoning only the
+    /// handle that happened to make the failing call -- would leave the others
+    /// looking healthy while talking to a dead engine.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `out` must be a valid pointer to receive the new connection
+    #[export_name = "sr_session_fork"]
+    pub extern "C" fn session_fork(
+        db: &Surreal,
+        err_ptr: *mut string_t,
+        out: *mut *mut Surreal,
+    ) -> c_int {
+        check_null!(out, err_ptr, "out is null");
+        if db.ps.load(Ordering::Acquire) {
+            write_error(err_ptr, "connection is poisoned: an earlier operation returned SR_FATAL");
+            return SR_FATAL;
+        }
+        // Cloning the SDK handle mints a new session id and tells the router to
+        // fork the session state from this one; the runtime and the poison flag
+        // are shared rather than duplicated.
+        let forked = Surreal {
+            db: db.db.clone(),
+            rt: Arc::clone(&db.rt),
+            ps: Arc::clone(&db.ps),
+        };
+        unsafe { out.write(Box::into_raw(Box::new(forked))) };
+        1
+    }
+
+    /// Fork a session and clear the state it inherited.
+    ///
+    /// As `sr_session_fork`, then `invalidate`, so the new handle starts with no
+    /// authentication rather than the parent's. Its namespace and database are
+    /// still inherited -- clearing those would leave a handle that cannot run
+    /// anything until the caller picks them again, and `sr_use_ns` / `sr_use_db`
+    /// are right there.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `out` must be a valid pointer to receive the new connection
+    #[export_name = "sr_session_new"]
+    pub extern "C" fn session_new(
+        db: &Surreal,
+        err_ptr: *mut string_t,
+        out: *mut *mut Surreal,
+    ) -> c_int {
+        let rc = Surreal::session_fork(db, err_ptr, out);
+        if rc < 0 {
+            return rc;
+        }
+        let forked: &Surreal = unsafe { &**out };
+        with_surreal_async(forked, err_ptr, |surreal| async {
+            surreal.db.invalidate().await.map_err(|e| string_t::from(e.to_string()))?;
+            Ok(1)
+        })
+    }
+
     /// Kill a live query by its UUID string
     ///
-    /// Stops the live query in the datastore: no further changes are delivered
-    /// for it.
+    /// Retires the live query in the datastore. **This is the only call that
+    /// does**, and it is required: `sr_stream_kill` frees the local stream but
+    /// leaves the subscription registered.
+    ///
+    /// # Tearing a live query down takes both calls
+    ///
+    /// ```c
+    /// sr_kill(db, &err, query_id);   // retires the subscription
+    /// sr_stream_kill(stream);        // frees the local reader
+    /// ```
+    ///
+    /// Neither does the other's job, and the order between them does not
+    /// matter. Measured with `INFO FOR TABLE`, which lists a table's `lives`:
+    /// after `sr_stream_kill` alone the entry is still there; after `sr_kill`
+    /// it is gone.
+    ///
+    /// `sr_stream_kill` does route a kill through the SDK, but it is spawned
+    /// and its result is discarded, so it cannot be relied on -- and it is
+    /// observably not happening on the version pinned here.
+    ///
+    /// # Getting the id is the hard part
+    ///
+    /// `sr_select_live` returns a stream and not the query id, and the SDK
+    /// keeps its own copy private, so the only way to learn the id is to read
+    /// it from `sr_notification_t.query_id` on the first notification. A live
+    /// query that never fires therefore cannot be retired by id at all; it goes
+    /// when the connection does.
+    ///
+    /// The alternative is to run `LIVE SELECT ...` through `sr_query`, which
+    /// answers with the id -- but then there is no `sr_stream_t` to read from.
+    /// Picking one of those is a real limitation, not a style choice.
     ///
     /// # This does not end an `sr_stream_t`
     ///
     /// A stream from `sr_select_live` goes quiet but stays open, and no
-    /// `SR_CLOSED` ever arrives -- see the TODO on `src/types/stream.rs` for why
-    /// (a core bug three layers up, not something this library can work around).
-    /// A reader polling that stream cannot tell "nothing happening right now"
-    /// from "this query is dead", and will keep waiting on a corpse.
-    ///
-    /// **To retire a stream, call `sr_stream_kill`.** That does stop the
-    /// underlying live query -- by a different route that the defect does not
-    /// touch -- and releases the stream in the same step. Reach for `sr_kill`
-    /// only for a live query registered some other way, such as a bare
-    /// `LIVE SELECT` run through `sr_query`, where no `sr_stream_t` exists to
-    /// be stranded.
-    ///
-    /// Note that `REMOVE TABLE` strands a stream the same way, so this is a
-    /// property of the path rather than of this function.
+    /// `SR_CLOSED` arrives -- see the TODO on `src/types/stream.rs` (an upstream
+    /// defect, fixed by surrealdb/surrealdb#7520). `REMOVE TABLE` strands a
+    /// stream the same way, so that is a property of the path rather than of
+    /// this function.
     ///
     /// # Safety
     ///
@@ -961,14 +1071,14 @@ impl Surreal {
     /// }
     ///
     /// Every wait is bounded, so a reader always gets control back. Loop on
-    /// SR_NONE and check whatever else the thread must stay responsive to.
+    /// SR_AGAIN and check whatever else the thread must stay responsive to.
     ///
     /// sr_notification_t note;
     /// while (running)
     /// {
     ///     int got = sr_stream_next_timeout(stream, &note, 250);
     ///     if (got > 0) { sr_print_notification(&note); sr_notification_free(note); }
-    ///     else if (got == SR_NONE) continue;   // nothing yet
+    ///     else if (got == SR_AGAIN) continue;  // nothing yet
     ///     else break;                          // SR_CLOSED or an error
     /// }
     /// sr_stream_kill(stream);

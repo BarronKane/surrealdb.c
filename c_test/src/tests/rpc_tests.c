@@ -351,7 +351,7 @@ TEST(RPC, DetachCancelsLiveQueries) {
     got = sr_rpc_stream_next_timeout(stream, &payload, 500);
     if (payload) sr_byte_arr_free(payload, got);
     TEST_ASSERT_EQUAL_INT_MESSAGE(
-        SR_NONE, got,
+        SR_AGAIN, got,
         "a detached session's live query must not keep notifying");
 
     if (err) sr_string_free(err);
@@ -493,6 +493,101 @@ TEST(RPC, TypedQueryBindsVarsAndReportsPerStatement) {
     sr_surreal_rpc_disconnect(rpc);
 }
 
+/*
+ * The `kill` RPC method works, and the bandaid behind it runs.
+ *
+ * Nothing covered this method before. It also exercises the workaround in
+ * run_rpc for handle_kill never firing: `kill` carries its live query id in its
+ * own params, so that route can retire the registry entry exactly, without
+ * parsing SQL. The registry is internal, so what is asserted here is the
+ * observable half -- the call succeeds and the subscription really is gone.
+ *
+ * TODO(upstream, unfiled): when KILL returns its query id and handle_kill fires
+ * on its own, delete the capture block in run_rpc. This test keeps passing.
+ */
+TEST(RPC, KillMethodRetiresTheLiveQuery) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_rpc_stream_t *stream = NULL;
+    if (sr_surreal_rpc_notifications(rpc, &err, &stream) < 0) {
+        if (err) sr_string_free(err);
+        sr_surreal_rpc_disconnect(rpc);
+        TEST_FAIL_MESSAGE("notifications stream should open");
+    }
+
+    sr_uuid_t id;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+
+    uint8_t req[256];
+    int n = rpc_request_2(req, (int)sizeof(req), "use", "test", "test");
+    rpc_run_on(rpc, &id, req, n, "use");
+
+    /* The LIVE statement answers with its own query id. */
+    sr_arr_res_t *res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id,
+                        "DEFINE TABLE killable SCHEMALESS; LIVE SELECT * FROM killable;",
+                        NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(1, n, "both statements should report");
+
+    const sr_value_t *lq = sr_array_get(&res[1].ok, 0);
+    TEST_ASSERT_NOT_NULL_MESSAGE(lq, "LIVE SELECT should yield a value");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_UUID, lq->tag,
+        "a LIVE statement should answer with its query id");
+
+    const uint8_t *u = lq->sr_value_uuid._0;
+    char qid[37];
+    snprintf(qid, sizeof(qid),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+             u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    sr_arr_res_arr_free(res, n);
+
+    /* Prove it is live before killing it. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id, "CREATE killable:1 SET v = 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    sr_arr_res_arr_free(res, n);
+
+    uint8_t *payload = NULL;
+    int got = sr_rpc_stream_next_timeout(stream, &payload, 2000);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "the live query should notify");
+    if (payload) sr_byte_arr_free(payload, got);
+
+    /* The id goes over the wire as text, which is the shape a hand-rolled CBOR
+       encoder produces and one of the two the extractor accepts. */
+    n = rpc_request_1(req, (int)sizeof(req), "kill", qid);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    rpc_run_on(rpc, &id, req, n, "the kill method");
+
+    /* Killing emits a final KILLED marker. */
+    payload = NULL;
+    got = sr_rpc_stream_next_timeout(stream, &payload, 2000);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "a kill should report KILLED");
+    if (payload) sr_byte_arr_free(payload, got);
+
+    /* And then nothing: the subscription is genuinely gone. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id, "CREATE killable:2 SET v = 2;", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+
+    payload = NULL;
+    got = sr_rpc_stream_next_timeout(stream, &payload, 500);
+    if (payload) sr_byte_arr_free(payload, got);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, got,
+        "a killed live query must not keep notifying");
+
+    if (err) sr_string_free(err);
+    sr_rpc_stream_free(stream);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
 TEST(RPC, Free) {
     sr_surreal_rpc_t *rpc;
     sr_string_t err;
@@ -512,5 +607,6 @@ TEST_GROUP_RUNNER(RPC) {
     RUN_TEST_CASE(RPC, DetachCancelsLiveQueries);
     RUN_TEST_CASE(RPC, TypedQueryRunsOnItsOwnSession);
     RUN_TEST_CASE(RPC, TypedQueryBindsVarsAndReportsPerStatement);
+    RUN_TEST_CASE(RPC, KillMethodRetiresTheLiveQuery);
     RUN_TEST_CASE(RPC, Free);
 }

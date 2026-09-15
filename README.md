@@ -57,7 +57,7 @@ sr_surreal_disconnect(db);
 
 Calls return a negative status on failure — `SR_ERROR`, `SR_CLOSED` or
 `SR_FATAL` — and write a message to `err_ptr` for the caller to release with
-`sr_string_free`. The sign carries the meaning: positive is a result, `SR_NONE`
+`sr_string_free`. The sign carries the meaning: positive is a result, `SR_AGAIN`
 (zero) means nothing was available and the call is worth repeating, and negative
 means stop. Notification streams report their end with `SR_CLOSED`. Passing `NULL` for `err_ptr` discards the message. Anything a
 `sr_*_new` or `sr_value_*` constructor hands back is released by the matching
@@ -177,7 +177,7 @@ sr_notification_t note;
 while (running) {
     int got = sr_stream_next_timeout(stream, &note, 250);
     if (got > 0)            { handle(&note); sr_notification_free(note); }
-    else if (got == SR_NONE) continue;   // nothing yet
+    else if (got == SR_AGAIN) continue;   // nothing yet
     else                     break;      // SR_CLOSED, or an error
 }
 sr_stream_kill(stream);
@@ -201,8 +201,25 @@ client rejects `KILLED` when decoding it and drops the frame silently, fixed by
 [#7521](https://github.com/surrealdb/surrealdb/pull/7521). So the advice holds on
 both transports for now, and neither fix subsumes the other.
 
-`sr_kill` stops a live query in the datastore but does not end an `sr_stream_t`,
-for the same reason. Use `sr_stream_kill`.
+### Tearing one down takes both calls
+
+```c
+sr_kill(db, &err, query_id);   // retires the subscription in the datastore
+sr_stream_kill(stream);        // frees the local reader
+```
+
+Neither does the other's job, and the order between them does not matter.
+`sr_stream_kill` does spawn a kill through the SDK, but fire-and-forget with the
+result discarded, and it observably does not land: measured with `INFO FOR
+TABLE`, the table's `lives` map still holds the subscription afterwards, and
+only `sr_kill` empties it. A test pins that.
+
+Getting `query_id` is the awkward part. `sr_select_live` hands back a stream and
+not the id, and the SDK keeps its own copy private, so the only way to learn it
+is from `sr_notification_t.query_id` on the first notification — a live query
+that never fires cannot be retired by id, and goes when the connection does.
+Running `LIVE SELECT ...` through `sr_query` answers with the id instead, but
+then there is no stream to read.
 
 ## Sessions
 
@@ -222,11 +239,34 @@ sr_rpc_session_detach(rpc, &err, &id);      // also cancels its live queries
 `opts.session_dir` persists sessions to disk, so an attached session outlives
 the context that created it.
 
+### Sessions on the typed path
+
+`sr_session_fork` gives a second `sr_surreal_t` that talks to the same engine
+over the same runtime, with its own `USE` namespace and database, its own `LET`
+variables, and its own authentication:
+
+```c
+sr_surreal_t *player = NULL;
+sr_session_fork(db, &err, &player);      // shares the engine, not the state
+sr_use_db(player, &err, "tenant_b");     // does not touch `db`
+...
+sr_surreal_disconnect(player);           // freed like any other handle
+```
+
+A fork is a session, not a connection: no engine is started, no runtime is
+built, and no threads are added. `sr_session_new` does the same and then clears
+the inherited authentication.
+
+Poisoning is shared. If any handle reports `SR_FATAL` the engine is gone, so
+every handle derived from it is poisoned too — the alternative would leave
+siblings looking healthy while talking to a dead engine.
+
 ### Two clients, and which to reach for
 
 `sr_connect` gives the typed calls — `sr_query`, `sr_select`, `sr_create` and
-the rest — over `sr_value_t`, and has no sessions. `sr_surreal_rpc_new` has
-sessions, and speaks SurrealDB's RPC protocol in CBOR.
+the rest — over `sr_value_t`, with sessions via `sr_session_fork`.
+`sr_surreal_rpc_new` speaks SurrealDB's RPC protocol in CBOR, with sessions
+addressed by uuid.
 
 The RPC context is the **escape hatch**: it reaches the whole protocol surface,
 including methods the typed API does not wrap, which is what you want for proxy

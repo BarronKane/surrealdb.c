@@ -1,5 +1,6 @@
 #include "unity_fixture.h"
 #include "surrealdb.h"
+#include "test_support.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -65,9 +66,9 @@ TEST(Stream, Next) {
     int got = sr_stream_next_timeout(stream, &notification, 2000);
 
     TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(
-        SR_NONE, got, "a notification should arrive within two seconds");
+        SR_AGAIN, got, "a notification should arrive within two seconds");
 
-    /* Only a positive result carries a notification. SR_NONE (0) means nothing
+    /* Only a positive result carries a notification. SR_AGAIN (0) means nothing
        arrived in time and SR_CLOSED means the stream ended without delivering the
        CREATE above; both are failures here, as is any other negative. */
     TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "a notification should be received");
@@ -108,8 +109,8 @@ TEST(Stream, NextTimeoutZeroDoesNotBlock) {
     sr_notification_t notification;
     int got = sr_stream_next_timeout(stream, &notification, 0);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, got,
-        "an empty queue polled with no timeout should report SR_NONE");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, got,
+        "an empty queue polled with no timeout should report SR_AGAIN");
 
     sr_stream_kill(stream);
 }
@@ -131,7 +132,7 @@ TEST(Stream, ExpiredWaitDoesNotDropNotifications) {
     sr_notification_t notification;
     for (int i = 0; i < 3; i++) {
         int empty = sr_stream_next_timeout(stream, &notification, 10);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, empty,
+        TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, empty,
             "nothing has been written, so every poll should expire");
     }
 
@@ -230,9 +231,9 @@ TEST(Stream, KillDoesNotYetEndTheStream) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
 
-    /* SR_NONE, not a notification: the kill took effect, so the later write
+    /* SR_AGAIN, not a notification: the kill took effect, so the later write
        was not delivered. And not SR_CLOSED: the stream will not admit it. */
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, after,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, after,
         "TRIPWIRE: KILL now ends the stream -- #7520 has landed, invert this test");
 }
 
@@ -250,8 +251,83 @@ TEST(Stream, RemoveTableDoesNotYetEndTheStream) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, after,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, after,
         "TRIPWIRE: REMOVE TABLE now ends the stream -- #7520 has landed, invert this test");
+}
+
+/* Subscriptions registered on `table`, via INFO FOR TABLE's `lives` map. */
+static int live_count(const char *table) {
+    char sql[96];
+    snprintf(sql, sizeof(sql), "INFO FOR TABLE %s;", table);
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res, sql, NULL);
+    if (n <= 0) { if (err) { sr_string_free(err); err = NULL; } return -1; }
+
+    int count = -1;
+    if (sr_array_len(&res[0].ok) > 0) {
+        const sr_value_t *info = sr_array_get(&res[0].ok, 0);
+        if (info && info->tag == SR_VALUE_OBJECT) {
+            const sr_value_t *lives = sr_object_get(&info->sr_value_object, "lives");
+            if (lives && lives->tag == SR_VALUE_OBJECT) {
+                count = sr_object_len(&lives->sr_value_object);
+            }
+        }
+    }
+    sr_arr_res_arr_free(res, n);
+    return count;
+}
+
+/*
+ * Tearing a live query down takes both calls, and only one of them retires it.
+ *
+ * The names invite the opposite reading -- "kill" the stream and surely the
+ * query is killed -- and this library's own docs said so until it was measured.
+ * Dropping the SDK stream does spawn a kill, but fire-and-forget with the
+ * result discarded, and it observably does not land.
+ *
+ * `INFO FOR TABLE` lists a table's `lives`, which is the only view of the
+ * subscription a C caller has.
+ */
+TEST(Stream, StreamKillDoesNotRetireTheQueryButKillDoes) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_stream_t *stream = live_on("teardown");
+    if (stream == NULL) {
+        TEST_IGNORE_MESSAGE("live queries unavailable on this build");
+    }
+
+    /* The id is only reachable from a notification: sr_select_live does not
+       return it and the SDK keeps its own copy private. */
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res, "CREATE teardown:1 SET v = 1", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    if (n < 0 && err) { sr_string_free(err); err = NULL; }
+
+    sr_notification_t note;
+    int got = sr_stream_next_timeout(stream, &note, 2000);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "the live query should notify");
+
+    const uint8_t *u = note.query_id._0;
+    char qid[37];
+    snprintf(qid, sizeof(qid),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+             u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    sr_notification_free(note);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, live_count("teardown"),
+        "the subscription should be registered while the stream is open");
+
+    sr_stream_kill(stream);
+    test_sleep_ms(500);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, live_count("teardown"),
+        "sr_stream_kill frees the reader; it does NOT retire the subscription");
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_kill(db, &err, qid));
+    test_sleep_ms(500);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, live_count("teardown"),
+        "sr_kill is the call that retires it");
 }
 
 TEST_GROUP_RUNNER(Stream) {
@@ -260,5 +336,6 @@ TEST_GROUP_RUNNER(Stream) {
     RUN_TEST_CASE(Stream, ExpiredWaitDoesNotDropNotifications);
     RUN_TEST_CASE(Stream, KillDoesNotYetEndTheStream);
     RUN_TEST_CASE(Stream, RemoveTableDoesNotYetEndTheStream);
+    RUN_TEST_CASE(Stream, StreamKillDoesNotRetireTheQueryButKillDoes);
     RUN_TEST_CASE(Stream, Kill);
 }

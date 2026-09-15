@@ -426,7 +426,7 @@ impl Options {
 
 /// Apply process-wide settings. Call once, before opening any connection.
 ///
-/// Returns 1 when the settings were applied, `SR_NONE` when there was nothing
+/// Returns 1 when the settings were applied, `SR_AGAIN` when there was nothing
 /// to do, and `SR_ERROR` with a message when a value is rejected.
 ///
 /// # This is not idempotent, and cannot be
@@ -449,7 +449,7 @@ pub extern "C" fn runtime_init(
     opts: *const RuntimeOptions,
 ) -> c_int {
     if opts.is_null() {
-        return crate::SR_NONE;
+        return crate::SR_AGAIN;
     }
     let opts = unsafe { &*opts };
 
@@ -458,7 +458,7 @@ pub extern "C" fn runtime_init(
         return crate::SR_ERROR;
     }
     if opts.kvs_threadpool_size == 0 {
-        return crate::SR_NONE;
+        return crate::SR_AGAIN;
     }
 
     // The env var is the only control SurrealDB exposes for this; there is no
