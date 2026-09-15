@@ -903,6 +903,39 @@ impl RpcProtocol for SurrealRpcInner {
         );
     }
 
+    /// TODO(upstream): this never fires on surrealdb 3.2.4.
+    ///
+    /// Core dispatches it only when a `QueryType::Kill` response carries a
+    /// uuid:
+    ///
+    /// ```text
+    /// QueryType::Kill => if let Ok(PublicValue::Uuid(lqid)) = &response.result {
+    ///     this.handle_kill(lqid).await;
+    /// }
+    /// ```
+    ///
+    /// but `KILL` resolves to `Value::None` -- despite the comment directly
+    /// above that return reading "Return the query id". So the arm never
+    /// matches. This is not limited to a `KILL` written as query text: the
+    /// `kill` RPC method builds a `KillStatement` and runs it through the same
+    /// `run_query`, so it misses too. There is no route by which a client kill
+    /// reaches this hook.
+    ///
+    /// Consequence here: a registry entry for a client-killed live query is not
+    /// retired at the kill. It survives until `cleanup_lqs` runs -- session
+    /// detach, reset, or any re-authentication -- which then issues a redundant
+    /// `KILL` against an id that is already dead. Harmless per kill, but a
+    /// long-lived session that churns live queries accumulates entries for its
+    /// lifetime.
+    ///
+    /// Not worked around. We cannot learn *which* id was killed from a `None`
+    /// response, and the fix is one producer returning the value its own
+    /// comment promises.
+    ///
+    /// Distinct from the two live-query defects filed upstream: #7520 is the
+    /// embedded router dropping `Killed` for want of a session id, #7521 is the
+    /// WebSocket client rejecting `KILLED` when decoding it. Neither touches
+    /// this dispatch. As of writing this one is unfiled.
     async fn handle_kill(&self, lqid: &uuid::Uuid) {
         // The KILL has already run; this only retires the bookkeeping.
         self.live_queries.remove(lqid);

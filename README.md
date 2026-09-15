@@ -167,6 +167,43 @@ Two reasons this is worth setting even if the count seems fine:
 `SURREAL_KVS_THREADPOOL_SIZE` does the same thing if you would rather configure
 it from the environment.
 
+## Live queries
+
+`sr_select_live` returns a stream. Read it with `sr_stream_next_timeout` and
+retire it with `sr_stream_kill`:
+
+```c
+sr_notification_t note;
+while (running) {
+    int got = sr_stream_next_timeout(stream, &note, 250);
+    if (got > 0)            { handle(&note); sr_notification_free(note); }
+    else if (got == SR_NONE) continue;   // nothing yet
+    else                     break;      // SR_CLOSED, or an error
+}
+sr_stream_kill(stream);
+```
+
+`sr_stream_next` blocks without a bound. It is the natural call for a dedicated
+reader thread and it is **not recommended on the version currently pinned**: a
+killed live query does not report its end, so a reader parked there can wait for
+a notification that cannot arrive, and nothing can release it — `sr_stream_kill`
+frees the stream that reader is borrowing. `REMOVE TABLE` puts a stream in the
+same state without anyone asking for it.
+
+That is an upstream defect on the embedded engines, fixed by
+[surrealdb/surrealdb#7520](https://github.com/surrealdb/surrealdb/pull/7520). Two
+tripwire tests in `c_test/src/tests/stream_tests.c` pin the current behaviour and
+will fail once the fix is released and the dependency bumped — that failure is
+the signal to switch this recommendation back.
+
+A `ws://` endpoint has the same symptom from an unrelated cause: the WebSocket
+client rejects `KILLED` when decoding it and drops the frame silently, fixed by
+[#7521](https://github.com/surrealdb/surrealdb/pull/7521). So the advice holds on
+both transports for now, and neither fix subsumes the other.
+
+`sr_kill` stops a live query in the datastore but does not end an `sr_stream_t`,
+for the same reason. Use `sr_stream_kill`.
+
 ## Sessions
 
 An RPC context (`sr_surreal_rpc_new`) carries a session map. Since SurrealDB 3.1
@@ -184,6 +221,23 @@ sr_rpc_session_detach(rpc, &err, &id);      // also cancels its live queries
 `sr_rpc_session_default` gives the one the context created. Setting
 `opts.session_dir` persists sessions to disk, so an attached session outlives
 the context that created it.
+
+### Two clients, and which to reach for
+
+`sr_connect` gives the typed calls — `sr_query`, `sr_select`, `sr_create` and
+the rest — over `sr_value_t`, and has no sessions. `sr_surreal_rpc_new` has
+sessions, and speaks SurrealDB's RPC protocol in CBOR.
+
+The RPC context is the **escape hatch**: it reaches the whole protocol surface,
+including methods the typed API does not wrap, which is what you want for proxy
+work, protocol tooling, or anything the typed calls cannot express. It is fully
+supported, not deprecated.
+
+For application code that wants sessions without hand-encoding CBOR,
+`sr_rpc_query_on` runs a query on a chosen session and returns the same
+`sr_arr_res_t` array `sr_query` does. Session state — `USE`, auth, variables —
+applies, so two sessions can sit on different namespaces and not see each
+other's writes.
 
 ## Building
 

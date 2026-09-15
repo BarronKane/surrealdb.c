@@ -151,43 +151,114 @@ TEST(Stream, ExpiredWaitDoesNotDropNotifications) {
 }
 
 /*
- * A negative bound is rejected rather than treated as "wait forever".
+ * ===========================================================================
+ * TRIPWIRES -- these assert the BROKEN behaviour on surrealdb 3.2.4
+ * ===========================================================================
  *
- * poll(2) reads negative as infinite, and sr_stream_next_timeout deliberately
- * does not. A killed live query cannot be observed to end on this path (see the
- * TODO in src/types/stream.rs), so an unbounded wait here has no exit at all --
- * the reader cannot be woken and cannot be released by another thread. Rather
- * than leave that reachable and document it as a caveat, asking for it is an
- * error, and sr_stream_next was removed in 0.3.0 for the same reason.
+ * A killed live query does not end its stream on the embedded path: core emits
+ * the terminal Killed notification with no session id, and the SDK's local
+ * router drops any notification that names no session. See the module note in
+ * src/types/stream.rs.
  *
- * This must return immediately. If it ever blocks, the suite hangs, which is
- * the failure this whole contract exists to prevent.
+ * surrealdb/surrealdb#7520 fixes it. WHEN THAT SHIPS AND WE BUMP THE
+ * DEPENDENCY, THE TWO TESTS BELOW WILL START FAILING. That is the intended
+ * signal, not a regression: invert them to assert SR_CLOSED, drop the TODO,
+ * and make sr_stream_next the recommended read again in the README and in
+ * sr_stream_next's own doc.
+ *
+ * They are written against sr_stream_next_timeout on purpose. The behaviour
+ * under test is "the stream does not end", and asserting that with the
+ * unbounded sr_stream_next would hang the suite forever rather than fail it --
+ * the same defect Drew flagged in this file, one layer up.
  */
-TEST(Stream, NegativeTimeoutIsRejected) {
+
+/* Shared body: open a live query on `table`, prove it is live, run `stmt`,
+   then report what the stream does next within `budget_ms`. */
+static int stream_after(const char *table, const char *stmt, int budget_ms) {
+    sr_stream_t *stream = live_on(table);
+    if (stream == NULL) return SR_ERROR;
+
+    char create[128];
+    snprintf(create, sizeof(create), "CREATE %s:1 SET v = 1", table);
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res, create, NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    if (n < 0 && err) { sr_string_free(err); err = NULL; }
+
+    sr_notification_t note;
+    int got = sr_stream_next_timeout(stream, &note, 2000);
+    if (got <= 0) { sr_stream_kill(stream); return SR_ERROR; }
+
+    /* The live query id is only reachable from a notification. */
+    const uint8_t *u = note.query_id._0;
+    char qid[37];
+    snprintf(qid, sizeof(qid),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+             u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    sr_notification_free(note);
+
+    char sql[256];
+    snprintf(sql, sizeof(sql), stmt, qid);
+    res = NULL;
+    n = sr_query(db, &err, &res, sql, NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    if (n < 0 && err) { sr_string_free(err); err = NULL; }
+
+    /* Write again. If the subscription really is gone this produces nothing,
+       which is what makes the assertion below mean something: without it a
+       silent stream could just as well be a KILL that never ran. */
+    snprintf(create, sizeof(create), "CREATE %s:2 SET v = 2", table);
+    res = NULL;
+    n = sr_query(db, &err, &res, create, NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    if (n < 0 && err) { sr_string_free(err); err = NULL; }
+
+    int after = sr_stream_next_timeout(stream, &note, budget_ms);
+    if (after > 0) sr_notification_free(note);
+    sr_stream_kill(stream);
+    return after;
+}
+
+/* TODO(upstream #7520): flip to TEST_ASSERT_EQUAL_INT(SR_CLOSED, ...). */
+TEST(Stream, KillDoesNotYetEndTheStream) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
-    sr_stream_t *stream = live_on("bounded_stream");
-    if (stream == NULL) {
+    int after = stream_after("killed_stream", "KILL u'%s'", 700);
+    if (after == SR_ERROR) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
 
-    sr_notification_t notification;
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ERROR,
-        sr_stream_next_timeout(stream, &notification, -1),
-        "a negative bound must be rejected, not treated as an infinite wait");
+    /* SR_NONE, not a notification: the kill took effect, so the later write
+       was not delivered. And not SR_CLOSED: the stream will not admit it. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, after,
+        "TRIPWIRE: KILL now ends the stream -- #7520 has landed, invert this test");
+}
 
-    /* Still usable afterwards: the rejection is not a poisoning. */
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE,
-        sr_stream_next_timeout(stream, &notification, 0),
-        "the stream should still be readable after a rejected bound");
+/*
+ * The nastier half: nobody asked for this. A schema change on an unrelated code
+ * path strands every stream subscribed to the table.
+ *
+ * TODO(upstream #7520): flip to TEST_ASSERT_EQUAL_INT(SR_CLOSED, ...).
+ */
+TEST(Stream, RemoveTableDoesNotYetEndTheStream) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
-    sr_stream_kill(stream);
+    int after = stream_after("removed_stream", "REMOVE TABLE removed_stream%.0s", 700);
+    if (after == SR_ERROR) {
+        TEST_IGNORE_MESSAGE("live queries unavailable on this build");
+    }
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_NONE, after,
+        "TRIPWIRE: REMOVE TABLE now ends the stream -- #7520 has landed, invert this test");
 }
 
 TEST_GROUP_RUNNER(Stream) {
     RUN_TEST_CASE(Stream, Next);
     RUN_TEST_CASE(Stream, NextTimeoutZeroDoesNotBlock);
     RUN_TEST_CASE(Stream, ExpiredWaitDoesNotDropNotifications);
-    RUN_TEST_CASE(Stream, NegativeTimeoutIsRejected);
+    RUN_TEST_CASE(Stream, KillDoesNotYetEndTheStream);
+    RUN_TEST_CASE(Stream, RemoveTableDoesNotYetEndTheStream);
     RUN_TEST_CASE(Stream, Kill);
 }

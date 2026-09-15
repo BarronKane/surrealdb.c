@@ -1,40 +1,70 @@
 //! Live query notification streams.
 //!
-//! TODO(upstream): a killed live query never ends its stream on the embedded
-//! path, so `SR_CLOSED` is effectively unreachable there.
+//! TODO(upstream): on surrealdb 3.2.4 a killed live query never ends its stream
+//! on the embedded path, so `SR_CLOSED` is unreachable there and
+//! `sr_stream_next` can park forever. Two fixes are in flight; this module is
+//! written for the fixed behaviour and the tests pin the broken one.
 //!
-//! The cause is in surrealdb-core, not here, and not in the Rust SDK either.
-//! `KILL` builds its terminal notification with the session id hardcoded to
-//! `None` (surrealdb-core 3.2.4, `src/expr/statements/kill.rs`, the
-//! `PublicNotification::new(lid.into(), None, PublicAction::Killed, ..)` call).
-//! The SDK's local router then drops exactly that shape on the floor before it
-//! can be routed:
+//! # The defect
+//!
+//! `KILL` and `REMOVE TABLE` build their terminal notification with the session
+//! id hardcoded to `None` (`core/src/expr/statements/kill.rs`,
+//! `.../remove/table.rs`). The SDK's local router drops exactly that shape
+//! before routing it:
 //!
 //! ```text
-//! // surrealdb 3.2.4, src/engine/local/native.rs
+//! // surrealdb 3.2.4, src/engine/local/native.rs (and wasm.rs)
 //! let Some(session_id) = notification.session.map(|x| x.into_inner()) else {
 //!     continue                       // <- the Killed notification dies here
 //! };
 //! ```
 //!
-//! Every layer below that is already correct and needs no change:
+//! Everything below the gate is already correct: the router does not filter by
+//! action, `Stream<Value>::poll_next` maps `Action::Killed` to
+//! `Poll::Ready(None)`, and this module maps that `None` to `SR_CLOSED`. Only
+//! the missing session id stands between them. `REMOVE TABLE` is the worse
+//! case, because no caller asked for it -- an unrelated schema change orphans
+//! every stream on that table.
 //!
-//! - the router forwards all actions to the per-live-query sender, Killed
-//!   included -- it does not filter,
-//! - `Stream<Value>::poll_next` maps `Action::Killed` to `Poll::Ready(None)`,
-//!   i.e. end of stream (surrealdb 3.2.4, `src/method/live.rs`),
-//! - and this module maps that `None` to `SR_CLOSED`.
-//!
-//! So the whole chain works the moment that `None` becomes `Some(session_id)`.
-//! Nothing here can substitute for it: the fix is one field, three layers up.
-//!
-//! `RpcStream` is unaffected because it reads the datastore's broker channel
-//! directly and never passes through the session gate, which is why a KILLED
+//! `RpcStream` is unaffected: it reads the datastore's broker channel directly
+//! and never passes through the session gate, which is why a KILLED
 //! notification is observable there and nowhere else.
 //!
-//! Until it is fixed: every wait on `Stream` is bounded, so a reader always
-//! gets control back even though it cannot be told the query is dead. See
-//! `sr_stream_next_timeout`.
+//! # What lands when
+//!
+//! - **surrealdb/surrealdb#7520** -- carries the owning session id on `Killed`
+//!   notifications, taken from the subscription rather than from whoever ran the
+//!   `KILL`, so root killing another user's live query still notifies the right
+//!   stream. When this ships, `sr_stream_next` and `sr_stream_next_timeout`
+//!   start reporting `SR_CLOSED` for a killed stream, and
+//!   `TEST(Stream, KillDoesNotYetEndTheStream)` and its `REMOVE TABLE` twin
+//!   start failing. **That failure is the signal to invert them**, not a
+//!   regression.
+//! - **surrealdb/surrealdb#7521** -- the WebSocket client's notification decoder
+//!   knows only three of the five `Action` variants and rejects its own wire
+//!   format for the other two, discarding the frame with no log line. Same
+//!   symptom, unrelated cause, and it applies to the *remote* endpoints this
+//!   library supports via `protocol-ws` rather than to the embedded path. The
+//!   tripwire tests below run on `mem://`, so they pin #7520 only; the
+//!   WebSocket path has no coverage here.
+//!
+//!   `Action::Error` is dropped by the same decoder. That is latent -- nothing
+//!   emits it yet -- but this crate's `sr_action` already carries
+//!   `SR_ACTION_ERROR`, so nothing here needs to change when it starts working.
+//!
+//! - **Unfiled** -- `KILL` resolves to `NONE` rather than to its own query id,
+//!   so core's `QueryType::Kill` dispatch never matches and
+//!   `RpcProtocol::handle_kill` never fires. Neither PR above touches it. See
+//!   the note on `SurrealRpcInner::handle_kill` in `rpc.rs`.
+//!
+//! None of the three is worked around here. All are producer-side fixes
+//! upstream, and a shim in this layer would be a thing to remove later.
+//!
+//! # Until then
+//!
+//! Prefer `sr_stream_next_timeout`. It cannot tell "quiet" from "dead" either,
+//! but it always returns, which is the difference between a slow reader and a
+//! thread that can only be retired by ending the process.
 
 use std::ffi::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -67,8 +97,8 @@ fn guard(f: impl FnOnce() -> c_int) -> c_int {
 ///
 /// May be sent across threads, but must not be aliased.
 /// Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
-/// to close. There is deliberately no unbounded read on this type; see the
-/// note on `sr_stream_next_timeout`.
+/// to close. `sr_stream_next` blocks without a bound and is correct only once
+/// surrealdb/surrealdb#7520 ships; see the module note.
 pub struct Stream {
     inner: sdbStream<sdbValue>,
     rt: Handle,
@@ -81,85 +111,59 @@ impl Stream {
 }
 
 impl Stream {
-    // TODO(upstream): restore `sr_stream_next` once a killed live query ends
-    // its stream on the embedded path -- see the module TODO above for the
-    // one-field fix in core that this waits on.
-    //
-    // Kept verbatim rather than deleted, because there is nothing wrong with
-    // this code: it is correct the moment `SR_CLOSED` becomes reachable. It is
-    // disabled only because an unbounded wait here currently has no exit, and a
-    // blocking read whose only outcome can be "park until the process dies" is
-    // worse than no blocking read at all.
-    //
-    // To bring it back: uncomment, drop the `timeout_ms < 0` rejection in
-    // `next_timeout` below so a negative bound delegates here again, restore the
-    // `sr_stream_next` entry in c_test/src/tests/api_bridge_tests.c, and delete
-    // `TEST(Stream, NegativeTimeoutIsRejected)`.
-    //
-    // /// Get the next notification, blocking until one arrives
-    // ///
-    // /// Returns 1 and writes to `notification_ptr` when a notification is received,
-    // /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
-    // /// It never returns SR_NONE: a blocking call has nothing to report until it
-    // /// has something.
-    // ///
-    // /// # Blocking and shutdown
-    // ///
-    // /// This call blocks until a notification is available. It is intended to be
-    // /// driven from a dedicated thread rather than a latency-sensitive one; see
-    // /// `sr_stream_next_timeout` for a bounded or non-blocking wait.
-    // ///
-    // /// A stream borrows the runtime owned by the connection it was opened on, so
-    // /// teardown is ordered: call `sr_stream_kill` first, then
-    // /// `sr_surreal_disconnect`. Disconnecting first drops that runtime out from
-    // /// under the stream, and the kill then runs against a runtime that is already
-    // /// shut down.
-    // ///
-    // /// There is no way to release a reader already parked in this call from another
-    // /// thread; `sr_stream_kill` frees the very stream that reader is borrowing. Call
-    // /// this only when an event is expected, and prefer `sr_stream_next_timeout`
-    // /// for a reader that has to be able to give up.
-    // #[export_name = "sr_stream_next"]
-    // pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
-    //     guard(|| match self.rt.block_on(self.inner.next()) {
-    //         Some(Ok(n)) => Self::deliver(n, notification_ptr),
-    //         Some(Err(_)) => SR_ERROR,
-    //         None => SR_CLOSED,
-    //     })
-    // }
+    /// Get the next notification, blocking until one arrives
+    ///
+    /// Returns 1 and writes to `notification_ptr` when a notification is
+    /// received, SR_CLOSED when the stream has ended, and SR_ERROR on a stream
+    /// error. It never returns SR_NONE: a blocking call has nothing to report
+    /// until it has something.
+    ///
+    /// # Not recommended on surrealdb 3.2.4
+    ///
+    /// This call is correct once surrealdb/surrealdb#7520 ships. Against the
+    /// version currently pinned it is not, and the failure mode is the worst
+    /// kind: a killed live query never reports its end, so a reader parked here
+    /// waits for a notification that cannot arrive. Nothing releases it --
+    /// `sr_stream_kill` frees the very stream the reader is borrowing, so
+    /// another thread cannot free it either, and the process has to die.
+    ///
+    /// `REMOVE TABLE` puts a stream in that state too, and no caller asked for
+    /// it, so "only block when you know an event is coming" is not a discipline
+    /// a caller can actually keep.
+    ///
+    /// Use `sr_stream_next_timeout` until the dependency is bumped past the
+    /// fix. See the module note for what changes when it is.
+    #[export_name = "sr_stream_next"]
+    pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
+        guard(|| match self.rt.block_on(self.inner.next()) {
+            Some(Ok(n)) => Self::deliver(n, notification_ptr),
+            Some(Err(_)) => SR_ERROR,
+            None => SR_CLOSED,
+        })
+    }
 
     /// Get the next notification, waiting no longer than `timeout_ms`
     ///
     /// Returns 1 and writes to `notification_ptr` when a notification is
     /// received, SR_NONE when the wait expired with the stream still open,
-    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error or
-    /// a negative `timeout_ms`.
+    /// SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
     ///
-    /// `timeout_ms` is a bound in milliseconds and zero polls once and returns
-    /// immediately. Unlike `poll(2)` a negative value is **not** "wait
-    /// forever" -- it is rejected with SR_ERROR. See below.
+    /// `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
+    /// `sr_stream_next`, zero polls once and returns immediately, and a positive
+    /// value waits up to that many milliseconds.
     ///
-    /// # There is no unbounded wait on this type, on purpose
+    /// # This is the call to use on surrealdb 3.2.4
     ///
-    /// A live query that is killed cannot be observed to end here (see the TODO
-    /// on this module). A reader parked with no deadline on such a stream has no
-    /// exit: nothing further arrives, SR_CLOSED never comes, and
-    /// `sr_stream_kill` frees the very stream that reader is borrowing, so
-    /// another thread cannot release it either. The process has to die.
-    ///
-    /// Rather than document that as a caveat and let callers walk into it, the
-    /// unbounded read is not offered: `sr_stream_next` is disabled in 0.3.0 --
-    /// commented out in place, not deleted, since it becomes correct again the
-    /// moment the upstream fix lands -- and a negative bound is an error rather
-    /// than a synonym for it. Every wait on this type therefore terminates.
+    /// A killed live query cannot be observed to end on the pinned version (see
+    /// the module note), so a bounded wait is the only read that is guaranteed
+    /// to return. It still cannot tell "nothing happening" from "this query is
+    /// dead" -- that distinction needs the upstream fix -- but a caller keeps
+    /// control and can check a shutdown flag, which an unbounded read on a dead
+    /// stream cannot.
     ///
     /// A long bound is cheap: the wait is a real timer, not a poll loop, so
     /// `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
     /// would have cost, and still returns.
-    ///
-    /// `sr_rpc_stream_next` keeps its unbounded form because the RPC path does
-    /// not have this defect: freeing the context ends the stream and releases a
-    /// parked reader with SR_CLOSED, which is covered by a test.
     ///
     /// # SR_NONE is not SR_CLOSED
     ///
@@ -188,9 +192,7 @@ impl Stream {
         timeout_ms: c_int,
     ) -> c_int {
         if timeout_ms < 0 {
-            // Not "wait forever": that state is unrecoverable on this path, so
-            // asking for it is a caller error rather than a supported mode.
-            return SR_ERROR;
+            return self.next(notification_ptr);
         }
         // Cloned so the future below can borrow `inner` mutably without also
         // holding a borrow of `rt`.

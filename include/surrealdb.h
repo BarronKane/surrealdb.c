@@ -96,8 +96,8 @@ typedef struct sr_rpc_stream_t sr_rpc_stream_t;
  *
  * May be sent across threads, but must not be aliased.
  * Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
- * to close. There is deliberately no unbounded read on this type; see the
- * note on `sr_stream_next_timeout`.
+ * to close. `sr_stream_next` blocks without a bound and is correct only once
+ * surrealdb/surrealdb#7520 ships; see the module note.
  */
 typedef struct sr_stream_t sr_stream_t;
 
@@ -2192,38 +2192,54 @@ void sr_string_arr_free(char **arr, int len);
 void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
 
 /**
+ * Get the next notification, blocking until one arrives
+ *
+ * Returns 1 and writes to `notification_ptr` when a notification is
+ * received, SR_CLOSED when the stream has ended, and SR_ERROR on a stream
+ * error. It never returns SR_NONE: a blocking call has nothing to report
+ * until it has something.
+ *
+ * # Not recommended on surrealdb 3.2.4
+ *
+ * This call is correct once surrealdb/surrealdb#7520 ships. Against the
+ * version currently pinned it is not, and the failure mode is the worst
+ * kind: a killed live query never reports its end, so a reader parked here
+ * waits for a notification that cannot arrive. Nothing releases it --
+ * `sr_stream_kill` frees the very stream the reader is borrowing, so
+ * another thread cannot free it either, and the process has to die.
+ *
+ * `REMOVE TABLE` puts a stream in that state too, and no caller asked for
+ * it, so "only block when you know an event is coming" is not a discipline
+ * a caller can actually keep.
+ *
+ * Use `sr_stream_next_timeout` until the dependency is bumped past the
+ * fix. See the module note for what changes when it is.
+ */
+int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notification_ptr);
+
+/**
  * Get the next notification, waiting no longer than `timeout_ms`
  *
  * Returns 1 and writes to `notification_ptr` when a notification is
  * received, SR_NONE when the wait expired with the stream still open,
- * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error or
- * a negative `timeout_ms`.
+ * SR_CLOSED when the stream has ended, and SR_ERROR on a stream error.
  *
- * `timeout_ms` is a bound in milliseconds and zero polls once and returns
- * immediately. Unlike `poll(2)` a negative value is **not** "wait
- * forever" -- it is rejected with SR_ERROR. See below.
+ * `timeout_ms` follows `poll(2)`: negative waits indefinitely and is exactly
+ * `sr_stream_next`, zero polls once and returns immediately, and a positive
+ * value waits up to that many milliseconds.
  *
- * # There is no unbounded wait on this type, on purpose
+ * # This is the call to use on surrealdb 3.2.4
  *
- * A live query that is killed cannot be observed to end here (see the TODO
- * on this module). A reader parked with no deadline on such a stream has no
- * exit: nothing further arrives, SR_CLOSED never comes, and
- * `sr_stream_kill` frees the very stream that reader is borrowing, so
- * another thread cannot release it either. The process has to die.
- *
- * Rather than document that as a caveat and let callers walk into it, the
- * unbounded read is not offered: `sr_stream_next` is disabled in 0.3.0 --
- * commented out in place, not deleted, since it becomes correct again the
- * moment the upstream fix lands -- and a negative bound is an error rather
- * than a synonym for it. Every wait on this type therefore terminates.
+ * A killed live query cannot be observed to end on the pinned version (see
+ * the module note), so a bounded wait is the only read that is guaranteed
+ * to return. It still cannot tell "nothing happening" from "this query is
+ * dead" -- that distinction needs the upstream fix -- but a caller keeps
+ * control and can check a shutdown flag, which an unbounded read on a dead
+ * stream cannot.
  *
  * A long bound is cheap: the wait is a real timer, not a poll loop, so
  * `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
  * would have cost, and still returns.
- *
- * `sr_rpc_stream_next` keeps its unbounded form because the RPC path does
- * not have this defect: freeing the context ends the stream and releases a
- * parked reader with SR_CLOSED, which is covered by a test.
  *
  * # SR_NONE is not SR_CLOSED
  *
