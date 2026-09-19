@@ -395,7 +395,7 @@ TEST(Session, PingSucceeds) {
 /*
  * A forked session has its own state and shares the engine.
  *
- * Until 0.3.2 sessions existed only on the RPC context, so the typed calls --
+ * Sessions used to exist only on the RPC context, so the typed calls --
  * sr_query, sr_select and the rest -- could not be used per-user at all. A
  * caller wanting isolation had to give up the typed surface and hand-encode
  * CBOR. sr_session_fork closes that: the SDK's own model is one handle per
@@ -498,6 +498,54 @@ TEST(Session, ForkCostsNoThreads) {
 #endif
 }
 
+/*
+ * sr_session_new is sr_session_fork plus a clear of the inherited
+ * authentication.
+ *
+ * What is asserted here is that it produces a usable, isolated handle that
+ * still inherits namespace and database -- clearing those would leave a handle
+ * that cannot run anything. The auth half is NOT covered: these tests run on
+ * `mem://` with no auth configured, where every session is already
+ * unauthenticated, so `invalidate` has nothing observable to do. Covering it
+ * needs a DEFINE USER fixture and a signed-in parent.
+ */
+TEST(Session, NewSessionIsUsableAndIsolated) {
+    sr_string_t e = NULL;
+    sr_surreal_t *a = NULL;
+    if (sr_connect(&e, &a, "mem://") < 0) {
+        if (e) sr_string_free(e);
+        TEST_FAIL_MESSAGE("connect should succeed");
+    }
+    sr_use_ns(a, &e, "t"); sr_use_db(a, &e, "t");
+
+    sr_surreal_t *b = NULL;
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, sr_session_new(a, &e, &b),
+        "sr_session_new should succeed");
+    TEST_ASSERT_NOT_NULL(b);
+
+    /* Namespace and database are inherited, so it is usable straight away. */
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(b, &e, &res, "RETURN 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n,
+        "a new session should inherit ns/db and run");
+    sr_arr_res_arr_free(res, n);
+
+    /* Same engine. */
+    res = NULL;
+    n = sr_query(a, &e, &res, "CREATE shared_new:1 SET v = 1;", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    res = NULL;
+    n = sr_query(b, &e, &res, "SELECT * FROM shared_new;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "a new session shares the engine with its parent");
+    sr_arr_res_arr_free(res, n);
+
+    if (e) sr_string_free(e);
+    sr_surreal_disconnect(b);
+    sr_surreal_disconnect(a);
+}
+
 /* The parent can be freed first; the engine outlives it. */
 TEST(Session, ForkOutlivesItsParent) {
     sr_string_t e = NULL;
@@ -526,6 +574,7 @@ TEST(Session, ForkOutlivesItsParent) {
 TEST_GROUP_RUNNER(Session) {
     RUN_TEST_CASE(Session, ForkIsolatesSessionState);
     RUN_TEST_CASE(Session, ForkCostsNoThreads);
+    RUN_TEST_CASE(Session, NewSessionIsUsableAndIsolated);
     RUN_TEST_CASE(Session, ForkOutlivesItsParent);
     RUN_TEST_CASE(Session, DefaultExists);
     RUN_TEST_CASE(Session, AttachGeneratesAnId);

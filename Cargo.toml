@@ -15,7 +15,33 @@ default-members = ["."]
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-surrealdb = { version = "3.2.4", features = [
+# TODO(anchor): these point at a fork, not at crates.io.
+#
+# The published releases carry four live-query defects this library cannot work
+# around from its own side:
+#   - KILL's terminal notification carries no session id, so the embedded router
+#     drops it and a killed stream never ends (surrealdb/surrealdb#7520);
+#   - the WebSocket client rejects KILLED when decoding it, same symptom on the
+#     remote transports (#7521);
+#   - `Stream::drop` builds `KILL {id}` from a bare UUID and runs it under a
+#     blank session, so freeing a stream never retired its subscription, and
+#     REMOVE DATABASE / REMOVE NAMESPACE announced nothing at all;
+#   - `KILL` resolves to NONE, so core's `QueryType::Kill` dispatch never matches
+#     and `RpcProtocol::handle_kill` never fires (unfiled).
+# The first three are fixed on this branch; the fourth is not, and `run_rpc`
+# carries a bandaid for it.
+#
+# `homebrew` is a released tag plus those three commits and their tests.
+# Anchoring on the release rather than on `main` is deliberate: `main` has no
+# durable RPC sessions at all -- the `RpcProtocol` persistence hooks this library
+# implements for `session_dir` were developed and shipped on the 3.2 line and
+# never forward-ported, and `Session` lost its `Serialize` derive with them. So
+# `main` would have cost the whole session-persistence feature with no way to
+# reimplement it.
+#
+# **Revert both of these to a crates.io version before opening any PR against
+# surrealdb/surrealdb.c** -- upstream cannot depend on a fork.
+surrealdb = { git = "https://github.com/BarronKane/surrealdb", branch = "homebrew", features = [
     "kv-surrealkv",
     "kv-mem",
     "protocol-http",
@@ -26,7 +52,7 @@ surrealdb = { version = "3.2.4", features = [
 # covers it. Turning it off is a capability trade, not a free win, so defaults
 # stay on until that call is made. `gql` is a separate, empty feature gating
 # the plan executor -- unrelated to GraphQL despite the name.
-surrealdb-core = { version = "3.2.4", features = [
+surrealdb-core = { git = "https://github.com/BarronKane/surrealdb", branch = "homebrew", features = [
     "http",
     "gql",
 ] }

@@ -1,70 +1,47 @@
 //! Live query notification streams.
 //!
-//! TODO(upstream): on surrealdb 3.2.4 a killed live query never ends its stream
-//! on the embedded path, so `SR_CLOSED` is unreachable there and
-//! `sr_stream_next` can park forever. Two fixes are in flight; this module is
-//! written for the fixed behaviour and the tests pin the broken one.
+//! # Anchor
 //!
-//! # The defect
+//! This crate builds against the `homebrew` branch, which carries live-query
+//! fixes that are not in a published release. Without them a killed live query
+//! never ended its stream: the terminal `Killed` notification carried no
+//! session id and the SDK's local router dropped anything that named no
+//! session, so `SR_CLOSED` was unreachable and a reader parked in
+//! `sr_stream_next` could wait forever. `REMOVE TABLE` stranded a stream the
+//! same way, without anyone asking for it.
 //!
-//! `KILL` and `REMOVE TABLE` build their terminal notification with the session
-//! id hardcoded to `None` (`core/src/expr/statements/kill.rs`,
-//! `.../remove/table.rs`). The SDK's local router drops exactly that shape
-//! before routing it:
-//!
-//! ```text
-//! // surrealdb 3.2.4, src/engine/local/native.rs (and wasm.rs)
-//! let Some(session_id) = notification.session.map(|x| x.into_inner()) else {
-//!     continue                       // <- the Killed notification dies here
-//! };
-//! ```
-//!
-//! Everything below the gate is already correct: the router does not filter by
-//! action, `Stream<Value>::poll_next` maps `Action::Killed` to
-//! `Poll::Ready(None)`, and this module maps that `None` to `SR_CLOSED`. Only
-//! the missing session id stands between them. `REMOVE TABLE` is the worse
-//! case, because no caller asked for it -- an unrelated schema change orphans
-//! every stream on that table.
-//!
-//! `RpcStream` is unaffected: it reads the datastore's broker channel directly
-//! and never passes through the session gate, which is why a KILLED
-//! notification is observable there and nowhere else.
-//!
-//! # What lands when
-//!
-//! - **surrealdb/surrealdb#7520** -- carries the owning session id on `Killed`
+//! - **surrealdb/surrealdb#7520** carries the owning session id on `Killed`
 //!   notifications, taken from the subscription rather than from whoever ran the
 //!   `KILL`, so root killing another user's live query still notifies the right
-//!   stream. When this ships, `sr_stream_next` and `sr_stream_next_timeout`
-//!   start reporting `SR_CLOSED` for a killed stream, and
-//!   `TEST(Stream, KillDoesNotYetEndTheStream)` and its `REMOVE TABLE` twin
-//!   start failing. **That failure is the signal to invert them**, not a
-//!   regression.
-//! - **surrealdb/surrealdb#7521** -- the WebSocket client's notification decoder
-//!   knows only three of the five `Action` variants and rejects its own wire
-//!   format for the other two, discarding the frame with no log line. Same
-//!   symptom, unrelated cause, and it applies to the *remote* endpoints this
-//!   library supports via `protocol-ws` rather than to the embedded path. The
-//!   tripwire tests below run on `mem://`, so they pin #7520 only; the
-//!   WebSocket path has no coverage here.
+//!   stream. This is what makes `SR_CLOSED` reachable, and it is covered by
+//!   `TEST(Stream, KillEndsTheStream)` and its `REMOVE TABLE` twin.
+//! - **surrealdb/surrealdb#7521** fixes the WebSocket client rejecting `KILLED`
+//!   when decoding it -- the same symptom for remote endpoints, an unrelated
+//!   cause, and the reason `Action::Error` was silently undeliverable there too.
+//!   This crate's `sr_action` already carries every variant, so nothing here
+//!   changed for it. No WebSocket fixture exists in this suite, so it is not
+//!   covered by a test on our side.
 //!
-//!   `Action::Error` is dropped by the same decoder. That is latent -- nothing
-//!   emits it yet -- but this crate's `sr_action` already carries
-//!   `SR_ACTION_ERROR`, so nothing here needs to change when it starts working.
+//! Both are open upstream, which is why the dependency is pinned to a fork. See
+//! the anchor note in `Cargo.toml`; when they are released, the dependency goes
+//! back to crates.io and nothing here needs to change.
 //!
-//! - **Unfiled** -- `KILL` resolves to `NONE` rather than to its own query id,
-//!   so core's `QueryType::Kill` dispatch never matches and
-//!   `RpcProtocol::handle_kill` never fires. Neither PR above touches it. See
-//!   the note on `SurrealRpcInner::handle_kill` in `rpc.rs`.
+//! # TODO(upstream, unfiled): the kill hook still never fires
 //!
-//! None of the three is worked around here. All are producer-side fixes
-//! upstream, and a shim in this layer would be a thing to remove later.
+//! `KILL` resolves to `NONE` rather than to its own query id, so core's
+//! `QueryType::Kill` dispatch never matches and `RpcProtocol::handle_kill` is
+//! never called -- for the `kill` RPC method as well as for a `KILL` written as
+//! query text. Neither fix above touches it. See the note on
+//! `SurrealRpcInner::handle_kill` in `rpc.rs` and the bandaid in `run_rpc`.
 //!
-//! # Until then
-//!
-//! Prefer `sr_stream_next_timeout`. It cannot tell "quiet" from "dead" either,
-//! but it always returns, which is the difference between a slow reader and a
-//! thread that can only be retired by ending the process.
+//! - **surrealdb/surrealdb (teardown)** -- `Stream::drop` built `KILL {id}` from
+//!   a bare UUID, which the parser rejects, and ran it under a blank session
+//!   with no namespace. So freeing a stream left its subscription registered,
+//!   on every platform, for every live query -- silently, since the kill is
+//!   spawned detached and its result discarded. `REMOVE DATABASE` and
+//!   `REMOVE NAMESPACE` destroyed subscriptions without announcing them at all.
+//!   Fixed on the anchor; `TEST(Stream, EitherTeardownRouteRetiresTheQuery)`
+//!   covers it, and both `sr_stream_kill` and `sr_kill` now stand alone.
 
 use std::ffi::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -96,9 +73,9 @@ fn guard(f: impl FnOnce() -> c_int) -> c_int {
 /// Stream for receiving live query notifications
 ///
 /// May be sent across threads, but must not be aliased.
-/// Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
-/// to close. `sr_stream_next` blocks without a bound and is correct only once
-/// surrealdb/surrealdb#7520 ships; see the module note.
+/// Use `sr_stream_next` or `sr_stream_next_timeout` to receive notifications.
+/// Freeing the reader takes `sr_stream_kill`; retiring the live query itself
+/// takes `sr_kill`, and they are separate steps.
 pub struct Stream {
     inner: sdbStream<sdbValue>,
     rt: Handle,
@@ -118,21 +95,18 @@ impl Stream {
     /// error. It never returns SR_AGAIN: a blocking call has nothing to report
     /// until it has something.
     ///
-    /// # Not recommended on surrealdb 3.2.4
+    /// # Blocking and shutdown
     ///
-    /// This call is correct once surrealdb/surrealdb#7520 ships. Against the
-    /// version currently pinned it is not, and the failure mode is the worst
-    /// kind: a killed live query never reports its end, so a reader parked here
-    /// waits for a notification that cannot arrive. Nothing releases it --
-    /// `sr_stream_kill` frees the very stream the reader is borrowing, so
-    /// another thread cannot free it either, and the process has to die.
+    /// This is the natural call for a dedicated reader thread: it parks until
+    /// there is something to report, and a killed live query does end the
+    /// stream, so it does return. That last part is only true on the anchored
+    /// dependency -- see the module note.
     ///
-    /// `REMOVE TABLE` puts a stream in that state too, and no caller asked for
-    /// it, so "only block when you know an event is coming" is not a discipline
-    /// a caller can actually keep.
-    ///
-    /// Use `sr_stream_next_timeout` until the dependency is bumped past the
-    /// fix. See the module note for what changes when it is.
+    /// What it still cannot do is wake for anything other than the stream. A
+    /// reader that also has to notice a shutdown flag wants
+    /// `sr_stream_next_timeout`, because `sr_stream_kill` frees the very stream
+    /// this reader is borrowing and so cannot be used to release it from another
+    /// thread.
     #[export_name = "sr_stream_next"]
     pub extern "C" fn next(&mut self, notification_ptr: *mut Notification) -> c_int {
         guard(|| match self.rt.block_on(self.inner.next()) {
@@ -152,14 +126,11 @@ impl Stream {
     /// `sr_stream_next`, zero polls once and returns immediately, and a positive
     /// value waits up to that many milliseconds.
     ///
-    /// # This is the call to use on surrealdb 3.2.4
+    /// # When to prefer it over `sr_stream_next`
     ///
-    /// A killed live query cannot be observed to end on the pinned version (see
-    /// the module note), so a bounded wait is the only read that is guaranteed
-    /// to return. It still cannot tell "nothing happening" from "this query is
-    /// dead" -- that distinction needs the upstream fix -- but a caller keeps
-    /// control and can check a shutdown flag, which an unbounded read on a dead
-    /// stream cannot.
+    /// When the reader has to stay responsive to something other than the
+    /// stream -- a shutdown flag, a frame budget, a cancellation token. The
+    /// blocking call returns on a kill, but only on a kill.
     ///
     /// A long bound is cheap: the wait is a real timer, not a poll loop, so
     /// `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
@@ -229,24 +200,19 @@ impl Stream {
         1
     }
 
-    /// Free a stream
+    /// Kill and free a stream
     ///
-    /// Releases the reader and its resources. The stream must not be used after
-    /// calling this function.
+    /// Retires the live query in the datastore and releases the reader. The
+    /// stream must not be used after calling this function.
     ///
-    /// # This does not retire the live query
+    /// This is the teardown to reach for whenever a stream exists, because it
+    /// needs no live query id -- `sr_select_live` does not hand one back.
+    /// `sr_kill` covers the other case, a subscription you have an id for but no
+    /// stream.
     ///
-    /// Despite the name, the subscription stays registered in the datastore.
-    /// Dropping the SDK stream does spawn a kill, but it is fire-and-forget with
-    /// its result discarded, and on the pinned version the subscription is
-    /// observably still listed by `INFO FOR TABLE` afterwards.
-    ///
-    /// Use `sr_kill` for that, and call both -- neither does the other's job:
-    ///
-    /// ```c
-    /// sr_kill(db, &err, query_id);   // retires the subscription
-    /// sr_stream_kill(stream);        // frees the local reader
-    /// ```
+    /// Until the anchor picked up "Retire live queries on every teardown path"
+    /// this freed the reader and left the subscription registered, so both calls
+    /// were required. See the module note.
     ///
     /// This runs on the runtime owned by the connection the stream was opened on,
     /// so it must be called before `sr_surreal_disconnect` on that connection.

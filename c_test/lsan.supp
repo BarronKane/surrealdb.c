@@ -7,7 +7,7 @@
 # surrealdb_c frame anywhere.
 #
 # Measured on the Auth group (which hashes a password via crypto::argon2 and so
-# does the most background work): 3/12 runs before the 0.2.1 geometry fix,
+# does the most background work): 3/12 runs before the geometry fix,
 # 2/12 after -- unchanged, and unrelated to it. A gate that fails one run in six
 # gets ignored, which is worse than not having one.
 #

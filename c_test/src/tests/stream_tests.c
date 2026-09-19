@@ -152,25 +152,18 @@ TEST(Stream, ExpiredWaitDoesNotDropNotifications) {
 }
 
 /*
- * ===========================================================================
- * TRIPWIRES -- these assert the BROKEN behaviour on surrealdb 3.2.4
- * ===========================================================================
+ * A killed live query ends its stream.
  *
- * A killed live query does not end its stream on the embedded path: core emits
- * the terminal Killed notification with no session id, and the SDK's local
- * router drops any notification that names no session. See the module note in
- * src/types/stream.rs.
+ * These two were tripwires before the anchor carried the fix: the terminal Killed
+ * notification carried no session id, so the SDK's local router dropped it and
+ * the stream stayed open and silent forever -- indistinguishable from an idle
+ * subscription. They asserted that broken behaviour and were written to fail the
+ * day it was fixed, which is how they were found when the anchor picked it up
+ * (surrealdb/surrealdb#7520).
  *
- * surrealdb/surrealdb#7520 fixes it. WHEN THAT SHIPS AND WE BUMP THE
- * DEPENDENCY, THE TWO TESTS BELOW WILL START FAILING. That is the intended
- * signal, not a regression: invert them to assert SR_CLOSED, drop the TODO,
- * and make sr_stream_next the recommended read again in the README and in
- * sr_stream_next's own doc.
- *
- * They are written against sr_stream_next_timeout on purpose. The behaviour
- * under test is "the stream does not end", and asserting that with the
- * unbounded sr_stream_next would hang the suite forever rather than fail it --
- * the same defect Drew flagged in this file, one layer up.
+ * They now assert the real contract. Both drive sr_stream_next_timeout rather
+ * than the blocking read: if the stream ever stops ending again, a bounded wait
+ * fails in under a second where sr_stream_next would hang the suite.
  */
 
 /* Shared body: open a live query on `table`, prove it is live, run `stmt`,
@@ -222,8 +215,7 @@ static int stream_after(const char *table, const char *stmt, int budget_ms) {
     return after;
 }
 
-/* TODO(upstream #7520): flip to TEST_ASSERT_EQUAL_INT(SR_CLOSED, ...). */
-TEST(Stream, KillDoesNotYetEndTheStream) {
+TEST(Stream, KillEndsTheStream) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
     int after = stream_after("killed_stream", "KILL u'%s'", 700);
@@ -231,19 +223,18 @@ TEST(Stream, KillDoesNotYetEndTheStream) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
 
-    /* SR_AGAIN, not a notification: the kill took effect, so the later write
-       was not delivered. And not SR_CLOSED: the stream will not admit it. */
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, after,
-        "TRIPWIRE: KILL now ends the stream -- #7520 has landed, invert this test");
+    /* Not SR_AGAIN: the stream reports its end rather than merely going quiet,
+       which is the difference between "nothing yet" and "stop asking". */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_CLOSED, after,
+        "a killed live query should end its stream with SR_CLOSED");
 }
 
 /*
- * The nastier half: nobody asked for this. A schema change on an unrelated code
- * path strands every stream subscribed to the table.
- *
- * TODO(upstream #7520): flip to TEST_ASSERT_EQUAL_INT(SR_CLOSED, ...).
+ * The half nobody asks for: a schema change on an unrelated code path. Dropping
+ * a table has to end the streams subscribed to it, since they can never produce
+ * another row.
  */
-TEST(Stream, RemoveTableDoesNotYetEndTheStream) {
+TEST(Stream, RemoveTableEndsTheStream) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
     int after = stream_after("removed_stream", "REMOVE TABLE removed_stream%.0s", 700);
@@ -251,8 +242,8 @@ TEST(Stream, RemoveTableDoesNotYetEndTheStream) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, after,
-        "TRIPWIRE: REMOVE TABLE now ends the stream -- #7520 has landed, invert this test");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_CLOSED, after,
+        "REMOVE TABLE should end the streams subscribed to that table");
 }
 
 /* Subscriptions registered on `table`, via INFO FOR TABLE's `lives` map. */
@@ -279,28 +270,44 @@ static int live_count(const char *table) {
 }
 
 /*
- * Tearing a live query down takes both calls, and only one of them retires it.
+ * Either teardown route retires the subscription.
  *
- * The names invite the opposite reading -- "kill" the stream and surely the
- * query is killed -- and this library's own docs said so until it was measured.
- * Dropping the SDK stream does spawn a kill, but fire-and-forget with the
- * result discarded, and it observably does not land.
+ * This was the opposite until the anchor picked up "Retire live queries on
+ * every teardown path". `Stream::drop` built `KILL {id}` from a bare UUID,
+ * which the parser rejects, and ran it under a blank session with no namespace
+ * -- so the reader was freed and the subscription was left registered, on every
+ * platform, for every live query. Both failures were silent: the kill is
+ * spawned detached from `Drop` and its result discarded.
  *
  * `INFO FOR TABLE` lists a table's `lives`, which is the only view of the
  * subscription a C caller has.
  */
-TEST(Stream, StreamKillDoesNotRetireTheQueryButKillDoes) {
+TEST(Stream, EitherTeardownRouteRetiresTheQuery) {
     TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
 
+    /* Route 1: hold the stream, free the stream. */
     sr_stream_t *stream = live_on("teardown");
     if (stream == NULL) {
         TEST_IGNORE_MESSAGE("live queries unavailable on this build");
     }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, live_count("teardown"),
+        "the subscription should be registered while the stream is open");
 
-    /* The id is only reachable from a notification: sr_select_live does not
-       return it and the SDK keeps its own copy private. */
+    sr_stream_kill(stream);
+    test_sleep_ms(500);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, live_count("teardown"),
+        "sr_stream_kill should retire the subscription, not just free the reader");
+
+    /* Route 2: hold an id, kill by id. The id is only reachable from a
+       notification -- sr_select_live does not return it, and the SDK keeps its
+       own copy private. */
+    stream = live_on("teardown2");
+    if (stream == NULL) {
+        TEST_IGNORE_MESSAGE("live queries unavailable on this build");
+    }
+
     sr_arr_res_t *res = NULL;
-    int n = sr_query(db, &err, &res, "CREATE teardown:1 SET v = 1", NULL);
+    int n = sr_query(db, &err, &res, "CREATE teardown2:1 SET v = 1", NULL);
     if (n > 0) sr_arr_res_arr_free(res, n);
     if (n < 0 && err) { sr_string_free(err); err = NULL; }
 
@@ -316,26 +323,26 @@ TEST(Stream, StreamKillDoesNotRetireTheQueryButKillDoes) {
              u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
     sr_notification_free(note);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, live_count("teardown"),
-        "the subscription should be registered while the stream is open");
-
-    sr_stream_kill(stream);
-    test_sleep_ms(500);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, live_count("teardown"),
-        "sr_stream_kill frees the reader; it does NOT retire the subscription");
-
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_kill(db, &err, qid));
     test_sleep_ms(500);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, live_count("teardown"),
-        "sr_kill is the call that retires it");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, live_count("teardown2"),
+        "sr_kill should retire the subscription");
+
+    /* And the reader is told, rather than being left to guess. */
+    int after = sr_stream_next_timeout(stream, &note, 2000);
+    if (after > 0) sr_notification_free(note);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_CLOSED, after,
+        "a stream whose query was killed by id should report SR_CLOSED");
+
+    sr_stream_kill(stream);
 }
 
 TEST_GROUP_RUNNER(Stream) {
     RUN_TEST_CASE(Stream, Next);
     RUN_TEST_CASE(Stream, NextTimeoutZeroDoesNotBlock);
     RUN_TEST_CASE(Stream, ExpiredWaitDoesNotDropNotifications);
-    RUN_TEST_CASE(Stream, KillDoesNotYetEndTheStream);
-    RUN_TEST_CASE(Stream, RemoveTableDoesNotYetEndTheStream);
-    RUN_TEST_CASE(Stream, StreamKillDoesNotRetireTheQueryButKillDoes);
+    RUN_TEST_CASE(Stream, KillEndsTheStream);
+    RUN_TEST_CASE(Stream, RemoveTableEndsTheStream);
+    RUN_TEST_CASE(Stream, EitherTeardownRouteRetiresTheQuery);
     RUN_TEST_CASE(Stream, Kill);
 }

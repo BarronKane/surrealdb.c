@@ -95,9 +95,9 @@ typedef struct sr_rpc_stream_t sr_rpc_stream_t;
  * Stream for receiving live query notifications
  *
  * May be sent across threads, but must not be aliased.
- * Use `sr_stream_next_timeout` to receive notifications and `sr_stream_kill`
- * to close. `sr_stream_next` blocks without a bound and is correct only once
- * surrealdb/surrealdb#7520 ships; see the module note.
+ * Use `sr_stream_next` or `sr_stream_next_timeout` to receive notifications.
+ * Freeing the reader takes `sr_stream_kill`; retiring the live query itself
+ * takes `sr_kill`, and they are separate steps.
  */
 typedef struct sr_stream_t sr_stream_t;
 
@@ -1261,45 +1261,31 @@ int sr_session_new(const struct sr_surreal_t *db, sr_string_t *err_ptr, struct s
 /**
  * Kill a live query by its UUID string
  *
- * Retires the live query in the datastore. **This is the only call that
- * does**, and it is required: `sr_stream_kill` frees the local stream but
- * leaves the subscription registered.
+ * Retires the subscription in the datastore. Any stream reading it is told:
+ * it reports `SR_CLOSED` rather than going quiet.
  *
- * # Tearing a live query down takes both calls
+ * # Which teardown to use
  *
- * ```c
- * sr_kill(db, &err, query_id);   // retires the subscription
- * sr_stream_kill(stream);        // frees the local reader
- * ```
+ * Both routes retire the subscription, so pick by what you are holding:
  *
- * Neither does the other's job, and the order between them does not
- * matter. Measured with `INFO FOR TABLE`, which lists a table's `lives`:
- * after `sr_stream_kill` alone the entry is still there; after `sr_kill`
- * it is gone.
+ * - an `sr_stream_t` from `sr_select_live` -- call `sr_stream_kill`, which
+ *   frees the reader and retires the query in one step;
+ * - a live query id and no stream, such as a bare `LIVE SELECT` run through
+ *   `sr_query` -- call this.
  *
- * `sr_stream_kill` does route a kill through the SDK, but it is spawned
- * and its result is discarded, so it cannot be relied on -- and it is
- * observably not happening on the version pinned here.
+ * Calling both is harmless but unnecessary. Until the anchor picked up
+ * "Retire live queries on every teardown path" it *was* necessary, because
+ * `sr_stream_kill` freed the reader while leaving the subscription
+ * registered. See the module note on `src/types/stream.rs`.
  *
  * # Getting the id is the hard part
  *
- * `sr_select_live` returns a stream and not the query id, and the SDK
- * keeps its own copy private, so the only way to learn the id is to read
- * it from `sr_notification_t.query_id` on the first notification. A live
- * query that never fires therefore cannot be retired by id at all; it goes
- * when the connection does.
- *
- * The alternative is to run `LIVE SELECT ...` through `sr_query`, which
- * answers with the id -- but then there is no `sr_stream_t` to read from.
- * Picking one of those is a real limitation, not a style choice.
- *
- * # This does not end an `sr_stream_t`
- *
- * A stream from `sr_select_live` goes quiet but stays open, and no
- * `SR_CLOSED` arrives -- see the TODO on `src/types/stream.rs` (an upstream
- * defect, fixed by surrealdb/surrealdb#7520). `REMOVE TABLE` strands a
- * stream the same way, so that is a property of the path rather than of
- * this function.
+ * `sr_select_live` returns a stream and not the query id, and the SDK keeps
+ * its own copy private, so the only way to learn the id is to read it from
+ * `sr_notification_t.query_id` on the first notification. That is why
+ * `sr_stream_kill` is the better route whenever a stream exists: it needs
+ * no id. Running `LIVE SELECT ...` through `sr_query` answers with the id
+ * instead, but then there is no `sr_stream_t` to read from.
  *
  * # Safety
  *
@@ -1913,6 +1899,19 @@ int sr_surreal_rpc_new(sr_string_t *err_ptr,
 /**
  * Execute an RPC request via raw CBOR bytes
  *
+ * # TODO(upstream, unfiled): prefer `sr_rpc_kill_on` over a `KILL` here
+ *
+ * Sending the `kill` method, or a `KILL` in a `query`, through this call
+ * retires the subscription but can leave this context's live-query
+ * registry holding a dead entry: SurrealDB reports a kill to a transport
+ * only when the response carries a uuid, and `KILL` resolves to `NONE`.
+ * The `kill` *method* is handled -- `run_rpc` takes the id from its
+ * parameters -- but a `KILL` inside query text is not recoverable.
+ *
+ * Bounded and not dangerous: the entry is reclaimed at session detach,
+ * reset or re-authentication, nothing keeps running, and a dead entry
+ * cannot stop a live one being retired. Avoidable via `sr_rpc_kill_on`.
+ *
  * # Safety
  *
  * - `err_ptr` must be a valid pointer or null
@@ -2019,6 +2018,19 @@ int sr_rpc_session_default(const struct sr_surreal_rpc_t *self,
  * Identical to `sr_surreal_rpc_execute` except that the session is chosen
  * by the caller rather than defaulting to this context's own.
  *
+ * # TODO(upstream, unfiled): prefer `sr_rpc_kill_on` over a `KILL` here
+ *
+ * Sending the `kill` method, or a `KILL` in a `query`, through this call
+ * retires the subscription but can leave this context's live-query
+ * registry holding a dead entry: SurrealDB reports a kill to a transport
+ * only when the response carries a uuid, and `KILL` resolves to `NONE`.
+ * The `kill` *method* is handled -- `run_rpc` takes the id from its
+ * parameters -- but a `KILL` inside query text is not recoverable.
+ *
+ * Bounded and not dangerous: the entry is reclaimed at session detach,
+ * reset or re-authentication, nothing keeps running, and a dead entry
+ * cannot stop a live one being retired. Avoidable via `sr_rpc_kill_on`.
+ *
  * # Safety
  *
  * - `err_ptr` must be a valid pointer or null
@@ -2051,6 +2063,25 @@ int sr_rpc_execute_on(const struct sr_surreal_rpc_t *self,
  * The return value is the number of statements, or negative on a failure
  * to run the query at all.
  *
+ * # TODO(upstream, unfiled): do not send `KILL` through this call
+ *
+ * Use `sr_rpc_kill_on` instead. A `KILL` written as query text retires the
+ * subscription but leaves this context's live-query registry holding a dead
+ * entry, because SurrealDB only reports a kill to a transport when the
+ * response carries a uuid and `KILL` resolves to `NONE` -- so there is no
+ * way to learn *which* live query went.
+ *
+ * The consequence is bounded and not dangerous: the entry costs two uuids
+ * and the namespace and database, it is reclaimed when the session is
+ * detached, reset or re-authenticated, and the redundant kill issued at
+ * that point fails harmlessly. Nothing is left running, and a dead entry
+ * cannot stop a live one being retired -- `StaleRegistryEntryDoesNotStrand\
+ * Others` pins that. It is simply avoidable, and `sr_rpc_kill_on` avoids
+ * it by passing the id as a parameter.
+ *
+ * Remove this note when the id becomes recoverable upstream; the registry
+ * will then stay correct whichever route a caller takes.
+ *
  * # Safety
  *
  * - `err_ptr` must be a valid pointer or null
@@ -2067,6 +2098,38 @@ int sr_rpc_query_on(const struct sr_surreal_rpc_t *self,
                     const struct sr_uuid_t *session_id,
                     const char *query,
                     const struct sr_object_t *vars);
+
+/**
+ * Retire a live query on a session, by its id.
+ *
+ * The typed counterpart to sending the `kill` RPC method as CBOR, and the
+ * route to prefer over writing `KILL` into query text.
+ *
+ * # Why prefer this over `KILL` in a query
+ *
+ * Both retire the subscription in the datastore, so either works. But this
+ * context keeps its own registry of the live queries a session owns, so it
+ * can retire them when the session is detached, reset, or re-authenticated
+ * -- and core only tells a transport about a kill when the response
+ * carries a uuid, which `KILL` does not produce (it resolves to `NONE`).
+ *
+ * The `kill` method carries the id in its own parameters, so this path can
+ * keep the registry straight without guessing. A `KILL` written as query
+ * text cannot: the kill happens, but the registry entry survives until the
+ * session is torn down. That costs a little memory and one redundant kill
+ * at teardown -- nothing is left running -- but there is no reason to pay
+ * it when this call exists.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `session_id` must be a valid pointer to a 16-byte uuid
+ * - `query_id` must be a valid null-terminated UTF-8 uuid string
+ */
+int sr_rpc_kill_on(const struct sr_surreal_rpc_t *self,
+                   sr_string_t *err_ptr,
+                   const struct sr_uuid_t *session_id,
+                   const char *query_id);
 
 /**
  * Get a stream for receiving live query notifications
@@ -2265,21 +2328,18 @@ void sr_arr_res_arr_free(struct sr_arr_res_t *ptr, int len);
  * error. It never returns SR_AGAIN: a blocking call has nothing to report
  * until it has something.
  *
- * # Not recommended on surrealdb 3.2.4
+ * # Blocking and shutdown
  *
- * This call is correct once surrealdb/surrealdb#7520 ships. Against the
- * version currently pinned it is not, and the failure mode is the worst
- * kind: a killed live query never reports its end, so a reader parked here
- * waits for a notification that cannot arrive. Nothing releases it --
- * `sr_stream_kill` frees the very stream the reader is borrowing, so
- * another thread cannot free it either, and the process has to die.
+ * This is the natural call for a dedicated reader thread: it parks until
+ * there is something to report, and a killed live query does end the
+ * stream, so it does return. That last part is only true on the anchored
+ * dependency -- see the module note.
  *
- * `REMOVE TABLE` puts a stream in that state too, and no caller asked for
- * it, so "only block when you know an event is coming" is not a discipline
- * a caller can actually keep.
- *
- * Use `sr_stream_next_timeout` until the dependency is bumped past the
- * fix. See the module note for what changes when it is.
+ * What it still cannot do is wake for anything other than the stream. A
+ * reader that also has to notice a shutdown flag wants
+ * `sr_stream_next_timeout`, because `sr_stream_kill` frees the very stream
+ * this reader is borrowing and so cannot be used to release it from another
+ * thread.
  */
 int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notification_ptr);
 
@@ -2294,14 +2354,11 @@ int sr_stream_next(struct sr_stream_t *self, struct sr_notification_t *notificat
  * `sr_stream_next`, zero polls once and returns immediately, and a positive
  * value waits up to that many milliseconds.
  *
- * # This is the call to use on surrealdb 3.2.4
+ * # When to prefer it over `sr_stream_next`
  *
- * A killed live query cannot be observed to end on the pinned version (see
- * the module note), so a bounded wait is the only read that is guaranteed
- * to return. It still cannot tell "nothing happening" from "this query is
- * dead" -- that distinction needs the upstream fix -- but a caller keeps
- * control and can check a shutdown flag, which an unbounded read on a dead
- * stream cannot.
+ * When the reader has to stay responsive to something other than the
+ * stream -- a shutdown flag, a frame budget, a cancellation token. The
+ * blocking call returns on a kill, but only on a kill.
  *
  * A long bound is cheap: the wait is a real timer, not a poll loop, so
  * `sr_stream_next_timeout(s, &n, 3600000)` costs what blocking for an hour
@@ -2333,24 +2390,19 @@ int sr_stream_next_timeout(struct sr_stream_t *self,
                            int timeout_ms);
 
 /**
- * Free a stream
+ * Kill and free a stream
  *
- * Releases the reader and its resources. The stream must not be used after
- * calling this function.
+ * Retires the live query in the datastore and releases the reader. The
+ * stream must not be used after calling this function.
  *
- * # This does not retire the live query
+ * This is the teardown to reach for whenever a stream exists, because it
+ * needs no live query id -- `sr_select_live` does not hand one back.
+ * `sr_kill` covers the other case, a subscription you have an id for but no
+ * stream.
  *
- * Despite the name, the subscription stays registered in the datastore.
- * Dropping the SDK stream does spawn a kill, but it is fire-and-forget with
- * its result discarded, and on the pinned version the subscription is
- * observably still listed by `INFO FOR TABLE` afterwards.
- *
- * Use `sr_kill` for that, and call both -- neither does the other's job:
- *
- * ```c
- * sr_kill(db, &err, query_id);   // retires the subscription
- * sr_stream_kill(stream);        // frees the local reader
- * ```
+ * Until the anchor picked up "Retire live queries on every teardown path"
+ * this freed the reader and left the subscription registered, so both calls
+ * were required. See the module note.
  *
  * This runs on the runtime owned by the connection the stream was opened on,
  * so it must be called before `sr_surreal_disconnect` on that connection.

@@ -103,11 +103,11 @@ the `gql` and `graphql` RPC methods, and `"files"` by `file://` values.
 ## Thread footprint
 
 A database embedded in someone else's process should not claim every core, so
-since 0.3.2 it does not. One `mem://` context on a 32-core host:
+it does not. One `mem://` context on a 32-core host:
 
 ```
-0.3.1                       68 threads   (32 tokio + 32 KVS + 4)
-0.3.2 defaults              40 threads   (4 tokio  + 32 KVS + 4)
+one worker per core         68 threads   (32 tokio + 32 KVS + 4)
+current defaults            40 threads   (4 tokio  + 32 KVS + 4)
   + sr_runtime_init(pool 4) 12 threads
   + current_thread           8 threads
 ```
@@ -183,43 +183,37 @@ while (running) {
 sr_stream_kill(stream);
 ```
 
-`sr_stream_next` blocks without a bound. It is the natural call for a dedicated
-reader thread and it is **not recommended on the version currently pinned**: a
-killed live query does not report its end, so a reader parked there can wait for
-a notification that cannot arrive, and nothing can release it — `sr_stream_kill`
-frees the stream that reader is borrowing. `REMOVE TABLE` puts a stream in the
-same state without anyone asking for it.
+`sr_stream_next` blocks without a bound and is the natural call for a dedicated
+reader thread: a killed live query ends the stream, so the loop terminates.
+Reach for `sr_stream_next_timeout` when the reader must also notice something
+else — a shutdown flag, say — since `sr_stream_kill` frees the very stream that
+reader is borrowing and so cannot release it from another thread.
 
-That is an upstream defect on the embedded engines, fixed by
-[surrealdb/surrealdb#7520](https://github.com/surrealdb/surrealdb/pull/7520). Two
-tripwire tests in `c_test/src/tests/stream_tests.c` pin the current behaviour and
-will fail once the fix is released and the dependency bumped — that failure is
-the signal to switch this recommendation back.
+That a kill ends the stream depends on the anchored dependency. On a published
+release it does not: the terminal notification carries no session id, the SDK's
+router drops it, and the stream stays open and silent forever. See the anchor
+note in `Cargo.toml`.
 
-A `ws://` endpoint has the same symptom from an unrelated cause: the WebSocket
-client rejects `KILLED` when decoding it and drops the frame silently, fixed by
-[#7521](https://github.com/surrealdb/surrealdb/pull/7521). So the advice holds on
-both transports for now, and neither fix subsumes the other.
+### Tearing one down
 
-### Tearing one down takes both calls
+Either route retires the subscription, so pick by what you are holding:
 
 ```c
-sr_kill(db, &err, query_id);   // retires the subscription in the datastore
-sr_stream_kill(stream);        // frees the local reader
+sr_stream_kill(stream);        // holding a stream: frees the reader and retires the query
+sr_kill(db, &err, query_id);   // holding only an id: retires it; any reader gets SR_CLOSED
 ```
 
-Neither does the other's job, and the order between them does not matter.
-`sr_stream_kill` does spawn a kill through the SDK, but fire-and-forget with the
-result discarded, and it observably does not land: measured with `INFO FOR
-TABLE`, the table's `lives` map still holds the subscription afterwards, and
-only `sr_kill` empties it. A test pins that.
+Prefer `sr_stream_kill` whenever a stream exists, because it needs no id —
+`sr_select_live` hands back a stream and not the query id, and the SDK keeps its
+own copy private, so the only way to learn the id is from
+`sr_notification_t.query_id` on the first notification. Running `LIVE SELECT ...`
+through `sr_query` answers with the id instead, but then there is no stream.
 
-Getting `query_id` is the awkward part. `sr_select_live` hands back a stream and
-not the id, and the SDK keeps its own copy private, so the only way to learn it
-is from `sr_notification_t.query_id` on the first notification — a live query
-that never fires cannot be retired by id, and goes when the connection does.
-Running `LIVE SELECT ...` through `sr_query` answers with the id instead, but
-then there is no stream to read.
+That either route works depends on the anchored dependency. On a published
+release `sr_stream_kill` frees the reader and leaves the subscription
+registered, because the SDK builds `KILL {id}` from a bare UUID — which the
+parser rejects — and runs it under a blank session. See the anchor note in
+`Cargo.toml`.
 
 ## Sessions
 
@@ -261,6 +255,42 @@ Poisoning is shared. If any handle reports `SR_FATAL` the engine is gone, so
 every handle derived from it is poisoned too — the alternative would leave
 siblings looking healthy while talking to a dead engine.
 
+### Retiring a live query on a session
+
+**Use `sr_rpc_kill_on`. Do not send `KILL` as query text.**
+
+```c
+sr_rpc_kill_on(rpc, &err, &session, query_id);   // do this
+sr_rpc_query_on(rpc, &err, &res, &session, "KILL u'...'", NULL);   // not this
+```
+
+Both retire the subscription, so the second is not broken — but it leaves this
+context's bookkeeping stale, and there is no reason to accept that when the
+first exists.
+
+An RPC context tracks which live queries a session owns, so it can retire them
+when the session is detached, reset or re-authenticated. SurrealDB reports a
+kill to a transport only when the response carries a uuid, and `KILL` resolves
+to `NONE`, so a kill written as query text gives the context no way to learn
+*which* live query went. `sr_rpc_kill_on` passes the id as a parameter, so the
+bookkeeping stays exact.
+
+The cost of getting it wrong is bounded and worth stating plainly: one registry
+entry — two uuids, a namespace and a database — held until the session is torn
+down, plus one redundant kill at that point which fails harmlessly. Nothing is
+left running, nothing grows past a single session's lifetime, and a dead entry
+cannot stop a live one from being retired. It is untidiness, not a leak of
+anything that matters.
+
+This is an upstream limitation, not a design choice here; the guidance goes away
+when the id becomes recoverable. The same applies to a `KILL` sent through
+`sr_surreal_rpc_execute` or `sr_rpc_execute_on` as query text — though the
+`kill` *method* through those calls is handled correctly, since its id arrives
+as a parameter.
+
+The typed path is unaffected: `sr_connect` keeps no registry, so `sr_kill` and a
+`KILL` through `sr_query` are equivalent there.
+
 ### Two clients, and which to reach for
 
 `sr_connect` gives the typed calls — `sr_query`, `sr_select`, `sr_create` and
@@ -278,6 +308,33 @@ For application code that wants sessions without hand-encoding CBOR,
 `sr_arr_res_t` array `sr_query` does. Session state — `USE`, auth, variables —
 applies, so two sessions can sit on different namespaces and not see each
 other's writes.
+
+## Dependency anchor
+
+The `surrealdb` and `surrealdb-core` dependencies point at a **fork**, not
+crates.io:
+
+```toml
+surrealdb = { git = "https://github.com/BarronKane/surrealdb", branch = "homebrew", ... }
+```
+
+`homebrew` is a released tag plus three live-query fixes. Without them a
+killed live query never ends its stream — on embedded
+([#7520](https://github.com/surrealdb/surrealdb/pull/7520)) and on WebSocket
+([#7521](https://github.com/surrealdb/surrealdb/pull/7521)) — and freeing a
+stream never retired its subscription at all, because the SDK's own teardown
+built an unparseable statement and ran it under a blank session. None of it can
+be compensated for in this layer; the failures happen before anything this
+library can see.
+
+Anchoring on the release rather than on upstream `main` is deliberate: `main` has
+no durable RPC sessions at all. The `RpcProtocol` persistence hooks behind
+`opts.session_dir` were developed and shipped on the 3.2 line and never
+forward-ported, and `Session` lost its `Serialize` derive along with them — so
+`main` would cost that feature outright, with no way to reimplement it.
+
+When the two fixes are released, this goes back to a crates.io version. **It must
+do so before any PR upstream**, which cannot depend on a fork.
 
 ## Building
 

@@ -50,11 +50,10 @@ use crate::credentials::{credentials_scope, credentials_access};
 /// Returned by the bounded-wait calls when the wait expires. It is not an
 /// error and not an ending, which is why it is zero rather than negative.
 ///
-/// Named for `EAGAIN`, which is the same idea. It replaced `SR_NONE` in 0.3.2:
-/// that name had meant "the stream ended" until 0.3.0 and then kept its
-/// spelling while its meaning inverted, so `if (r == SR_NONE) break;` still
-/// compiled and silently became dead code. Retiring the name turns that into a
-/// compile error instead.
+/// Named for `EAGAIN`, which is the same idea. It replaced `SR_NONE`, a name
+/// that had meant "the stream ended" and then kept its spelling while its
+/// meaning inverted, so `if (r == SR_NONE) break;` still compiled and silently
+/// became dead code. Retiring the name turns that into a compile error.
 pub const SR_AGAIN: c_int = 0;
 /// The source has ended. Calling again is pointless.
 ///
@@ -980,45 +979,31 @@ impl Surreal {
 
     /// Kill a live query by its UUID string
     ///
-    /// Retires the live query in the datastore. **This is the only call that
-    /// does**, and it is required: `sr_stream_kill` frees the local stream but
-    /// leaves the subscription registered.
+    /// Retires the subscription in the datastore. Any stream reading it is told:
+    /// it reports `SR_CLOSED` rather than going quiet.
     ///
-    /// # Tearing a live query down takes both calls
+    /// # Which teardown to use
     ///
-    /// ```c
-    /// sr_kill(db, &err, query_id);   // retires the subscription
-    /// sr_stream_kill(stream);        // frees the local reader
-    /// ```
+    /// Both routes retire the subscription, so pick by what you are holding:
     ///
-    /// Neither does the other's job, and the order between them does not
-    /// matter. Measured with `INFO FOR TABLE`, which lists a table's `lives`:
-    /// after `sr_stream_kill` alone the entry is still there; after `sr_kill`
-    /// it is gone.
+    /// - an `sr_stream_t` from `sr_select_live` -- call `sr_stream_kill`, which
+    ///   frees the reader and retires the query in one step;
+    /// - a live query id and no stream, such as a bare `LIVE SELECT` run through
+    ///   `sr_query` -- call this.
     ///
-    /// `sr_stream_kill` does route a kill through the SDK, but it is spawned
-    /// and its result is discarded, so it cannot be relied on -- and it is
-    /// observably not happening on the version pinned here.
+    /// Calling both is harmless but unnecessary. Until the anchor picked up
+    /// "Retire live queries on every teardown path" it *was* necessary, because
+    /// `sr_stream_kill` freed the reader while leaving the subscription
+    /// registered. See the module note on `src/types/stream.rs`.
     ///
     /// # Getting the id is the hard part
     ///
-    /// `sr_select_live` returns a stream and not the query id, and the SDK
-    /// keeps its own copy private, so the only way to learn the id is to read
-    /// it from `sr_notification_t.query_id` on the first notification. A live
-    /// query that never fires therefore cannot be retired by id at all; it goes
-    /// when the connection does.
-    ///
-    /// The alternative is to run `LIVE SELECT ...` through `sr_query`, which
-    /// answers with the id -- but then there is no `sr_stream_t` to read from.
-    /// Picking one of those is a real limitation, not a style choice.
-    ///
-    /// # This does not end an `sr_stream_t`
-    ///
-    /// A stream from `sr_select_live` goes quiet but stays open, and no
-    /// `SR_CLOSED` arrives -- see the TODO on `src/types/stream.rs` (an upstream
-    /// defect, fixed by surrealdb/surrealdb#7520). `REMOVE TABLE` strands a
-    /// stream the same way, so that is a property of the path rather than of
-    /// this function.
+    /// `sr_select_live` returns a stream and not the query id, and the SDK keeps
+    /// its own copy private, so the only way to learn the id is to read it from
+    /// `sr_notification_t.query_id` on the first notification. That is why
+    /// `sr_stream_kill` is the better route whenever a stream exists: it needs
+    /// no id. Running `LIVE SELECT ...` through `sr_query` answers with the id
+    /// instead, but then there is no `sr_stream_t` to read from.
     ///
     /// # Safety
     ///
@@ -1043,7 +1028,19 @@ impl Surreal {
         with_surreal_async(db, err_ptr, |surreal| async {
             let uuid_str = unsafe { CStr::from_ptr(query_id) }.to_str()?;
             let query = format!("KILL u'{}'", uuid_str);
-            surreal.db.query(query).await.map_err(|e| string_t::from(e.to_string()))?;
+            let mut res = surreal
+                .db
+                .query(query)
+                .await
+                .map_err(|e| string_t::from(e.to_string()))?;
+
+            // `await` surfaces transport failures, not per-statement ones, so
+            // the statement's own result has to be taken to see whether the
+            // KILL actually ran. Without this the call reported success for an
+            // id that had already been killed, or never existed at all.
+            let _: Option<sdbValue> = res
+                .take(0)
+                .map_err(|e| string_t::from(e.to_string()))?;
             Ok(0)
         })
     }

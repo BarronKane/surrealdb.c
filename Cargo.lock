@@ -4135,8 +4135,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "surrealdb"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01fef5cc04dd6cb042391d48c0f78a586c56042e999f8cb17f0b97b0a147e2c0"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4181,8 +4180,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-collections"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca3472955f9692427583e78476d5b03c6f750bf11dc8a04383e0d365d7bd5d99"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "revision",
  "storekey",
@@ -4191,8 +4189,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-core"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "addr",
  "affinitypool",
@@ -4314,8 +4311,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-strand"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a86f53e307b6b8275b15eaff2b718add63605cb804395d156589770c3bf38e56"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "revision",
  "serde",
@@ -4325,8 +4321,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-types"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0d70c7f4dbf1198521282a171a03f2f77f38a1225a149f7c0175e758f773b8a"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4356,8 +4351,7 @@ dependencies = [
 [[package]]
 name = "surrealdb-types-derive"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc11310bfc0ae3e546cd14788f8d36e7616dbe41fa68b4b265b29fea34a7d7e1"
+source = "git+https://github.com/BarronKane/surrealdb?branch=homebrew#048ab6e0948d3356b33f5972a6c9d61514e7812f"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",

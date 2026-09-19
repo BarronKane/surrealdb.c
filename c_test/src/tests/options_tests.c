@@ -175,7 +175,7 @@ static int thread_count(void) {
 /*
  * A context must not claim a worker per core.
  *
- * Until 0.3.2 the runtime was `Runtime::new()`, which is one tokio worker per
+ * The runtime used to be `Runtime::new()`, which is one tokio worker per
  * core -- 32 on the machine this was written on, for a database the host uses
  * intermittently. No Rust consumer meets that default because they bring their
  * own runtime; it existed only because the C boundary had to invent one and

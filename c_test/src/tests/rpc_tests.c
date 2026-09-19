@@ -588,6 +588,226 @@ TEST(RPC, KillMethodRetiresTheLiveQuery) {
     sr_surreal_rpc_disconnect(rpc);
 }
 
+/*
+ * sr_rpc_kill_on retires a live query on a chosen session.
+ *
+ * The typed counterpart to the `kill` RPC method, and the route to prefer over
+ * writing KILL into query text: the id arrives as a parameter, so this context
+ * can keep its live-query registry straight. Core only reports a kill to a
+ * transport when the response carries a uuid, and KILL resolves to NONE, so the
+ * registry cannot be maintained from the query-text path at all.
+ */
+TEST(RPC, KillOnRetiresALiveQuery) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_rpc_stream_t *stream = NULL;
+    if (sr_surreal_rpc_notifications(rpc, &err, &stream) < 0) {
+        if (err) sr_string_free(err);
+        sr_surreal_rpc_disconnect(rpc);
+        TEST_FAIL_MESSAGE("notifications stream should open");
+    }
+
+    sr_uuid_t id;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+
+    uint8_t req[256];
+    int n = rpc_request_2(req, (int)sizeof(req), "use", "test", "test");
+    rpc_run_on(rpc, &id, req, n, "use");
+
+    sr_arr_res_t *res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id,
+                        "DEFINE TABLE killon SCHEMALESS; LIVE SELECT * FROM killon;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(1, n, "both statements should report");
+
+    const sr_value_t *lq = sr_array_get(&res[1].ok, 0);
+    TEST_ASSERT_NOT_NULL(lq);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_VALUE_UUID, lq->tag,
+        "LIVE SELECT should answer with its query id");
+
+    const uint8_t *u = lq->sr_value_uuid._0;
+    char qid[37];
+    snprintf(qid, sizeof(qid),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+             u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    sr_arr_res_arr_free(res, n);
+
+    /* Live before the kill. */
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id, "CREATE killon:1 SET v = 1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    sr_arr_res_arr_free(res, n);
+
+    uint8_t *payload = NULL;
+    int got = sr_rpc_stream_next_timeout(stream, &payload, 2000);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "the live query should notify");
+    if (payload) sr_byte_arr_free(payload, got);
+
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, sr_rpc_kill_on(rpc, &err, &id, qid),
+        "killing a live query on its own session should succeed");
+
+    /* Killing announces itself, then the subscription is gone. */
+    payload = NULL;
+    got = sr_rpc_stream_next_timeout(stream, &payload, 2000);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, got, "a kill should report KILLED");
+    if (payload) sr_byte_arr_free(payload, got);
+
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id, "CREATE killon:2 SET v = 2;", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+
+    payload = NULL;
+    got = sr_rpc_stream_next_timeout(stream, &payload, 500);
+    if (payload) sr_byte_arr_free(payload, got);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_AGAIN, got,
+        "a killed live query must not keep notifying");
+
+    if (err) sr_string_free(err);
+    sr_rpc_stream_free(stream);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/* Bad input is a caller error, reported rather than passed to the parser. */
+TEST(RPC, KillOnRejectsBadInput) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_uuid_t id;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ERROR, sr_rpc_kill_on(rpc, &err, NULL, "x"),
+        "a null session id should be rejected");
+    if (err) { sr_string_free(err); err = NULL; }
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(SR_ERROR, sr_rpc_kill_on(rpc, &err, &id, NULL),
+        "a null query id should be rejected");
+    if (err) { sr_string_free(err); err = NULL; }
+
+    TEST_ASSERT_LESS_THAN_INT_MESSAGE(0, sr_rpc_kill_on(rpc, &err, &id, "not-a-uuid"),
+        "a malformed query id should be rejected, not handed to the parser");
+    TEST_ASSERT_NOT_NULL(err);
+    if (err) { sr_string_free(err); err = NULL; }
+
+    sr_surreal_rpc_disconnect(rpc);
+}
+
+/* Subscriptions on `table`, read through a session on the RPC context. */
+static int rpc_live_count(sr_surreal_rpc_t *rpc, const sr_uuid_t *session, const char *table) {
+    char sql[96];
+    snprintf(sql, sizeof(sql), "INFO FOR TABLE %s;", table);
+    sr_string_t e = NULL;
+    sr_arr_res_t *res = NULL;
+    int n = sr_rpc_query_on(rpc, &e, &res, session, sql, NULL);
+    int count = -1;
+    if (n > 0 && sr_array_len(&res[0].ok) > 0) {
+        const sr_value_t *info = sr_array_get(&res[0].ok, 0);
+        if (info && info->tag == SR_VALUE_OBJECT) {
+            const sr_value_t *lives = sr_object_get(&info->sr_value_object, "lives");
+            if (lives && lives->tag == SR_VALUE_OBJECT) {
+                count = sr_object_len(&lives->sr_value_object);
+            }
+        }
+    }
+    if (n > 0) sr_arr_res_arr_free(res, n);
+    if (e) sr_string_free(e);
+    return count;
+}
+
+/*
+ * A live query killed through query text leaves a stale registry entry, and
+ * that entry must not strand the session's other live queries at teardown.
+ *
+ * This is the blast radius of the unfixed kill-hook defect: core only tells a
+ * transport about a kill when the response carries a uuid, and KILL resolves to
+ * NONE, so a KILL written as query text retires the subscription without this
+ * context learning which one went. `sr_rpc_kill_on` avoids it by passing the id
+ * as a parameter; query text cannot.
+ *
+ * What is asserted is that the consequence stays bounded: cleanup issues a
+ * redundant kill for the dead entry, that kill fails, and the loop carries on
+ * to the live one rather than bailing.
+ */
+TEST(RPC, StaleRegistryEntryDoesNotStrandOthers) {
+    sr_surreal_rpc_t *rpc;
+    sr_string_t err = NULL;
+    sr_option_t opts = {0};
+
+    if (sr_surreal_rpc_new(&err, &rpc, "memory", opts) < 0) {
+        if (err) sr_string_free(err);
+        TEST_FAIL_MESSAGE("Failed to create RPC connection");
+    }
+
+    sr_uuid_t id;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_attach(rpc, &err, &id));
+    uint8_t req[256];
+    int n = rpc_request_2(req, (int)sizeof(req), "use", "test", "test");
+    rpc_run_on(rpc, &id, req, n, "use");
+
+    /* Two live queries on one session. */
+    sr_arr_res_t *res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id,
+        "DEFINE TABLE mx1 SCHEMALESS; LIVE SELECT * FROM mx1;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(1, n);
+    const sr_value_t *v = sr_array_get(&res[1].ok, 0);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_UUID, v->tag);
+    const uint8_t *u = v->sr_value_uuid._0;
+    char q1[37];
+    snprintf(q1, sizeof(q1),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+             u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    sr_arr_res_arr_free(res, n);
+
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id,
+        "DEFINE TABLE mx2 SCHEMALESS; LIVE SELECT * FROM mx2;", NULL);
+    TEST_ASSERT_GREATER_THAN_INT(1, n);
+    sr_arr_res_arr_free(res, n);
+
+    TEST_ASSERT_EQUAL_INT(1, rpc_live_count(rpc, &id, "mx1"));
+    TEST_ASSERT_EQUAL_INT(1, rpc_live_count(rpc, &id, "mx2"));
+
+    /* Kill the first through query text: retired in the datastore, but this
+       context is never told, so its registry entry survives. */
+    char sql[96];
+    snprintf(sql, sizeof(sql), "KILL u'%s';", q1);
+    res = NULL;
+    n = sr_rpc_query_on(rpc, &err, &res, &id, sql, NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, res[0].err.code, "the KILL itself should succeed");
+    sr_arr_res_arr_free(res, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rpc_live_count(rpc, &id, "mx1"),
+        "query-text KILL should still retire the subscription");
+
+    /* Detach. The dead entry is walked first and its kill fails; the live one
+       must still be retired. */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_detach(rpc, &err, &id));
+
+    sr_uuid_t def;
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sr_rpc_session_default(rpc, &err, &def));
+    n = rpc_request_2(req, (int)sizeof(req), "use", "test", "test");
+    rpc_run_on(rpc, &def, req, n, "use on the default session");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rpc_live_count(rpc, &def, "mx2"),
+        "a stale entry must not stop cleanup from retiring the live one");
+
+    if (err) sr_string_free(err);
+    sr_surreal_rpc_disconnect(rpc);
+}
+
 TEST(RPC, Free) {
     sr_surreal_rpc_t *rpc;
     sr_string_t err;
@@ -608,5 +828,8 @@ TEST_GROUP_RUNNER(RPC) {
     RUN_TEST_CASE(RPC, TypedQueryRunsOnItsOwnSession);
     RUN_TEST_CASE(RPC, TypedQueryBindsVarsAndReportsPerStatement);
     RUN_TEST_CASE(RPC, KillMethodRetiresTheLiveQuery);
+    RUN_TEST_CASE(RPC, KillOnRetiresALiveQuery);
+    RUN_TEST_CASE(RPC, KillOnRejectsBadInput);
+    RUN_TEST_CASE(RPC, StaleRegistryEntryDoesNotStrandOthers);
     RUN_TEST_CASE(RPC, Free);
 }

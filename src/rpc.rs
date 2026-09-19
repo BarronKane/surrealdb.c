@@ -167,6 +167,19 @@ impl SurrealRpc {
 
     /// Execute an RPC request via raw CBOR bytes
     ///
+    /// # TODO(upstream, unfiled): prefer `sr_rpc_kill_on` over a `KILL` here
+    ///
+    /// Sending the `kill` method, or a `KILL` in a `query`, through this call
+    /// retires the subscription but can leave this context's live-query
+    /// registry holding a dead entry: SurrealDB reports a kill to a transport
+    /// only when the response carries a uuid, and `KILL` resolves to `NONE`.
+    /// The `kill` *method* is handled -- `run_rpc` takes the id from its
+    /// parameters -- but a `KILL` inside query text is not recoverable.
+    ///
+    /// Bounded and not dangerous: the entry is reclaimed at session detach,
+    /// reset or re-authentication, nothing keeps running, and a dead entry
+    /// cannot stop a live one being retired. Avoidable via `sr_rpc_kill_on`.
+    ///
     /// # Safety
     ///
     /// - `err_ptr` must be a valid pointer or null
@@ -384,6 +397,19 @@ impl SurrealRpc {
     /// Identical to `sr_surreal_rpc_execute` except that the session is chosen
     /// by the caller rather than defaulting to this context's own.
     ///
+    /// # TODO(upstream, unfiled): prefer `sr_rpc_kill_on` over a `KILL` here
+    ///
+    /// Sending the `kill` method, or a `KILL` in a `query`, through this call
+    /// retires the subscription but can leave this context's live-query
+    /// registry holding a dead entry: SurrealDB reports a kill to a transport
+    /// only when the response carries a uuid, and `KILL` resolves to `NONE`.
+    /// The `kill` *method* is handled -- `run_rpc` takes the id from its
+    /// parameters -- but a `KILL` inside query text is not recoverable.
+    ///
+    /// Bounded and not dangerous: the entry is reclaimed at session detach,
+    /// reset or re-authentication, nothing keeps running, and a dead entry
+    /// cannot stop a live one being retired. Avoidable via `sr_rpc_kill_on`.
+    ///
     /// # Safety
     ///
     /// - `err_ptr` must be a valid pointer or null
@@ -434,6 +460,25 @@ impl SurrealRpc {
     /// the per-statement error channel, not a single all-or-nothing failure.
     /// The return value is the number of statements, or negative on a failure
     /// to run the query at all.
+    ///
+    /// # TODO(upstream, unfiled): do not send `KILL` through this call
+    ///
+    /// Use `sr_rpc_kill_on` instead. A `KILL` written as query text retires the
+    /// subscription but leaves this context's live-query registry holding a dead
+    /// entry, because SurrealDB only reports a kill to a transport when the
+    /// response carries a uuid and `KILL` resolves to `NONE` -- so there is no
+    /// way to learn *which* live query went.
+    ///
+    /// The consequence is bounded and not dangerous: the entry costs two uuids
+    /// and the namespace and database, it is reclaimed when the session is
+    /// detached, reset or re-authenticated, and the redundant kill issued at
+    /// that point fails harmlessly. Nothing is left running, and a dead entry
+    /// cannot stop a live one being retired -- `StaleRegistryEntryDoesNotStrand\
+    /// Others` pins that. It is simply avoidable, and `sr_rpc_kill_on` avoids
+    /// it by passing the id as a parameter.
+    ///
+    /// Remove this note when the id becomes recoverable upstream; the registry
+    /// will then stay correct whichever route a caller takes.
     ///
     /// # Safety
     ///
@@ -526,6 +571,81 @@ impl SurrealRpc {
             let ArrayGen { ptr, len } = acc.make_array();
             unsafe { res_ptr.write(ptr) }
             Ok(len)
+        })
+    }
+
+    /// Retire a live query on a session, by its id.
+    ///
+    /// The typed counterpart to sending the `kill` RPC method as CBOR, and the
+    /// route to prefer over writing `KILL` into query text.
+    ///
+    /// # Why prefer this over `KILL` in a query
+    ///
+    /// Both retire the subscription in the datastore, so either works. But this
+    /// context keeps its own registry of the live queries a session owns, so it
+    /// can retire them when the session is detached, reset, or re-authenticated
+    /// -- and core only tells a transport about a kill when the response
+    /// carries a uuid, which `KILL` does not produce (it resolves to `NONE`).
+    ///
+    /// The `kill` method carries the id in its own parameters, so this path can
+    /// keep the registry straight without guessing. A `KILL` written as query
+    /// text cannot: the kill happens, but the registry entry survives until the
+    /// session is torn down. That costs a little memory and one redundant kill
+    /// at teardown -- nothing is left running -- but there is no reason to pay
+    /// it when this call exists.
+    ///
+    /// # Safety
+    ///
+    /// - `err_ptr` must be a valid pointer or null
+    /// - `session_id` must be a valid pointer to a 16-byte uuid
+    /// - `query_id` must be a valid null-terminated UTF-8 uuid string
+    #[export_name = "sr_rpc_kill_on"]
+    pub extern "C" fn rpc_kill_on(
+        &self,
+        err_ptr: *mut string_t,
+        session_id: *const Uuid,
+        query_id: *const c_char,
+    ) -> c_int {
+        if session_id.is_null() {
+            write_error(err_ptr, "session_id is null");
+            return SR_ERROR;
+        }
+        if query_id.is_null() {
+            write_error(err_ptr, "query_id is null");
+            return SR_ERROR;
+        }
+        let session = uuid::Uuid::from(unsafe { (*session_id).clone() });
+
+        with_async(self, err_ptr, move |ctx| async move {
+            let id_str = unsafe { CStr::from_ptr(query_id) }
+                .to_str()
+                .map_err(|e| string_t::from(e.to_string()))?;
+            // Rejected here rather than passed through, so a malformed id is a
+            // caller error instead of a confusing failure from the parser.
+            let lqid = uuid::Uuid::parse_str(id_str)
+                .map_err(|_| string_t::from(format!("query_id is not a uuid: {id_str}")))?;
+
+            let mut params = surrealdb::types::Array::new();
+            params.push(sdbValue::Uuid(surrealdb::types::Uuid::from(lqid)));
+
+            let inner = ctx.inner.read().await;
+            let client_session = inner.persist_sessions_enabled().then_some(session);
+
+            <SurrealRpcInner as RpcProtocol>::execute(
+                &*inner,
+                None,
+                session,
+                client_session,
+                Method::Kill,
+                params,
+            )
+            .await
+            .map_err(|e| string_t::from(e.to_string()))?;
+
+            // The registry entry goes now. `run_rpc` does the same for a `kill`
+            // arriving as CBOR; both exist because core's own hook never fires.
+            inner.handle_kill(&lqid).await;
+            Ok(1)
         })
     }
 
@@ -942,7 +1062,7 @@ impl RpcProtocol for SurrealRpcInner {
         );
     }
 
-    /// TODO(upstream): this never fires on surrealdb 3.2.4.
+    /// TODO(upstream): this never fires.
     ///
     /// Core dispatches it only when a `QueryType::Kill` response carries a
     /// uuid:
@@ -967,9 +1087,20 @@ impl RpcProtocol for SurrealRpcInner {
     /// long-lived session that churns live queries accumulates entries for its
     /// lifetime.
     ///
-    /// Not worked around. We cannot learn *which* id was killed from a `None`
-    /// response, and the fix is one producer returning the value its own
-    /// comment promises.
+    /// Mitigated, not worked around. `run_rpc` and `sr_rpc_kill_on` both retire
+    /// the entry themselves for a `kill`, whose id arrives as a parameter, so
+    /// that route stays exact without guessing. A `KILL` written as query text
+    /// cannot be covered: the response says a kill happened but not which, and
+    /// recovering the id would mean scanning the statement. That is not worth
+    /// it -- a wrong guess prunes an entry we still own, so `cleanup_lqs` would
+    /// leave a live query running, which is worse than the entry it saves.
+    ///
+    /// What the query-text path actually costs: one registry entry (two uuids
+    /// and the namespace and database) until the session is detached, reset or
+    /// re-authenticated, plus one redundant kill at that point, which now fails
+    /// harmlessly because the entry is removed before the kill is issued.
+    /// Nothing is left running and nothing grows without bound beyond a single
+    /// session's lifetime.
     ///
     /// Distinct from the two live-query defects filed upstream: #7520 is the
     /// embedded router dropping `Killed` for want of a session id, #7521 is the
