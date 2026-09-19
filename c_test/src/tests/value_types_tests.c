@@ -275,7 +275,162 @@ TEST(ValueTypes, NullArrayYieldsAnEmptyContainer) {
     sr_value_free(s);
 }
 
+/*
+ * A record id key has four shapes, and a constructed one has to match the
+ * record it names.
+ *
+ * sr_value_thing writes a string key. Pointed at a record created as `t:1`
+ * -- a number -- it yields a well-formed record id that refers to nothing:
+ * the query returns no rows and no error. That silence is the reason the
+ * other three constructors exist, and the reason this asserts round trips
+ * rather than construction.
+ */
+TEST(ValueTypes, ThingKeysRoundTripInEveryShape) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res,
+        "CREATE rid:1 SET v = 'num'; CREATE rid:abc SET v = 'str'; "
+        "CREATE rid:['a', 1] SET v = 'arr'; CREATE rid:{ x: 1 } SET v = 'obj';",
+        NULL);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(3, n, "all four records should be created");
+    sr_arr_res_arr_free(res, n);
+
+    /* number */
+    sr_value_t *num = sr_value_thing_num("rid", 1);
+    sr_object_t vars = sr_object_new();
+    sr_object_insert(&vars, "r", num);
+    res = NULL;
+    n = sr_query(db, &err, &res, "SELECT * FROM $r;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "a numeric key should find the record created as rid:1");
+    sr_arr_res_arr_free(res, n);
+    sr_value_free(num);
+    sr_object_free(vars);
+
+    /* string -- the shape that already worked */
+    sr_value_t *str = sr_value_thing("rid", "abc");
+    vars = sr_object_new();
+    sr_object_insert(&vars, "r", str);
+    res = NULL;
+    n = sr_query(db, &err, &res, "SELECT * FROM $r;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "a string key should find the record created as rid:abc");
+    sr_arr_res_arr_free(res, n);
+    sr_value_free(str);
+    sr_object_free(vars);
+
+    /* array */
+    sr_value_t *elems[2];
+    elems[0] = sr_value_string("a");
+    elems[1] = sr_value_int(1);
+    sr_value_t vals[2] = { *elems[0], *elems[1] };
+    sr_array_t *key = sr_array_from_values(vals, 2);
+    sr_value_t *arr = sr_value_thing_arr("rid", key);
+    vars = sr_object_new();
+    sr_object_insert(&vars, "r", arr);
+    res = NULL;
+    n = sr_query(db, &err, &res, "SELECT * FROM $r;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "an array key should find the record created as rid:['a', 1]");
+    sr_arr_res_arr_free(res, n);
+    sr_value_free(arr);
+    sr_array_free(key);
+    sr_value_free(elems[0]);
+    sr_value_free(elems[1]);
+    sr_object_free(vars);
+
+    /* object */
+    sr_object_t idobj = sr_object_new();
+    sr_object_insert_int(&idobj, "x", 1);
+    sr_value_t *obj = sr_value_thing_obj("rid", &idobj);
+    vars = sr_object_new();
+    sr_object_insert(&vars, "r", obj);
+    res = NULL;
+    n = sr_query(db, &err, &res, "SELECT * FROM $r;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_array_len(&res[0].ok),
+        "an object key should find the record created as rid:{ x: 1 }");
+    sr_arr_res_arr_free(res, n);
+    sr_value_free(obj);
+    sr_object_free(idobj);
+    sr_object_free(vars);
+
+    if (err) { sr_string_free(err); err = NULL; }
+}
+
+/* A string key and a numeric key are different records, and confusing them is
+   silent -- which is the whole point of having both constructors. */
+TEST(ValueTypes, StringKeyIsNotNumericKey) {
+    TEST_ASSERT_NOT_NULL_MESSAGE(db, "Connection should succeed");
+
+    sr_arr_res_t *res = NULL;
+    int n = sr_query(db, &err, &res, "CREATE distinct_id:7 SET v = 1;", NULL);
+    if (n > 0) sr_arr_res_arr_free(res, n);
+
+    sr_value_t *as_str = sr_value_thing("distinct_id", "7");
+    sr_object_t vars = sr_object_new();
+    sr_object_insert(&vars, "r", as_str);
+    res = NULL;
+    n = sr_query(db, &err, &res, "SELECT * FROM $r;", &vars);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sr_array_len(&res[0].ok),
+        "a string key must not match a record created with a numeric one");
+    sr_arr_res_arr_free(res, n);
+    sr_value_free(as_str);
+    sr_object_free(vars);
+
+    if (err) { sr_string_free(err); err = NULL; }
+}
+
+/* The object counterpart to sr_array_from_values. */
+TEST(ValueTypes, ObjectFromEntriesMatchesInsert) {
+    sr_value_t *a = sr_value_int(1);
+    sr_value_t *b = sr_value_string("two");
+
+    const char *keys[2] = { "a", "b" };
+    sr_value_t vals[2] = { *a, *b };
+    sr_object_t bulk = sr_object_from_entries(keys, vals, 2);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, sr_object_len(&bulk), "both entries should be present");
+
+    const sr_value_t *ga = sr_object_get(&bulk, "a");
+    const sr_value_t *gb = sr_object_get(&bulk, "b");
+    TEST_ASSERT_NOT_NULL(ga);
+    TEST_ASSERT_NOT_NULL(gb);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_NUMBER, ga->tag);
+    TEST_ASSERT_EQUAL_INT(SR_VALUE_STRAND, gb->tag);
+
+    sr_object_free(bulk);
+    sr_value_free(a);
+    sr_value_free(b);
+}
+
+/* Bad input yields an empty object rather than an error, as the other bulk
+   constructors do. */
+TEST(ValueTypes, ObjectFromEntriesToleratesBadInput) {
+    sr_object_t empty = sr_object_from_entries(NULL, NULL, 0);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, sr_object_len(&empty), "null input yields an empty object");
+    sr_object_free(empty);
+
+    sr_value_t *v = sr_value_int(1);
+    const char *keys[2] = { NULL, "b" };
+    sr_value_t vals[2] = { *v, *v };
+    sr_object_t partial = sr_object_from_entries(keys, vals, 2);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, sr_object_len(&partial),
+        "a null key is skipped, not fatal");
+    sr_object_free(partial);
+    sr_value_free(v);
+}
+
 TEST_GROUP_RUNNER(ValueTypes) {
+    RUN_TEST_CASE(ValueTypes, ThingKeysRoundTripInEveryShape);
+    RUN_TEST_CASE(ValueTypes, StringKeyIsNotNumericKey);
+    RUN_TEST_CASE(ValueTypes, ObjectFromEntriesMatchesInsert);
+    RUN_TEST_CASE(ValueTypes, ObjectFromEntriesToleratesBadInput);
     RUN_TEST_CASE(ValueTypes, TableConstructor);
     RUN_TEST_CASE(ValueTypes, FileConstructor);
     RUN_TEST_CASE(ValueTypes, RegexConstructor);

@@ -119,6 +119,46 @@ impl Object {
     }
 
     /// Free an object
+    /// Build an object from parallel key and value arrays.
+    ///
+    /// The counterpart to `sr_array_from_values`. Without it, copying an object
+    /// means `sr_object_keys` followed by a `sr_object_get` and a
+    /// `sr_object_insert` per entry -- which works, and is what this does
+    /// internally, but makes a caller pay in call count for a shape the array
+    /// side gets in one.
+    ///
+    /// Both arrays are copied; the caller keeps ownership of what it passed in.
+    /// A null array, a null key within it, or a non-positive length yields an
+    /// empty object rather than an error, matching the other bulk constructors.
+    /// A key that repeats keeps the last value, as `sr_object_insert` does.
+    ///
+    /// # Safety
+    ///
+    /// - `keys` must be null, or point to at least `len` null-terminated strings
+    /// - `values` must be null, or point to at least `len` initialised Values
+    #[export_name = "sr_object_from_entries"]
+    pub extern "C" fn from_entries(
+        keys: *const *const c_char,
+        values: *const Value,
+        len: c_int,
+    ) -> Object {
+        let mut obj = Object::new();
+        if keys.is_null() || values.is_null() || len <= 0 {
+            return obj;
+        }
+        let ks = unsafe { std::slice::from_raw_parts(keys, len as usize) };
+        let vs = unsafe { std::slice::from_raw_parts(values, len as usize) };
+
+        for (k, v) in ks.iter().zip(vs.iter()) {
+            if k.is_null() {
+                continue;
+            }
+            let key = unsafe { CStr::from_ptr(*k) }.to_string_lossy().to_string();
+            obj.0.insert(key, v.clone());
+        }
+        obj
+    }
+
     #[export_name = "sr_object_free"]
     pub extern "C" fn object_free(obj: Object) {
         drop(obj)

@@ -2254,7 +2254,28 @@ void sr_object_insert_double(struct sr_object_t *obj, const char *key, double va
 
 /**
  * Free an object
+ * Build an object from parallel key and value arrays.
+ *
+ * The counterpart to `sr_array_from_values`. Without it, copying an object
+ * means `sr_object_keys` followed by a `sr_object_get` and a
+ * `sr_object_insert` per entry -- which works, and is what this does
+ * internally, but makes a caller pay in call count for a shape the array
+ * side gets in one.
+ *
+ * Both arrays are copied; the caller keeps ownership of what it passed in.
+ * A null array, a null key within it, or a non-positive length yields an
+ * empty object rather than an error, matching the other bulk constructors.
+ * A key that repeats keeps the last value, as `sr_object_insert` does.
+ *
+ * # Safety
+ *
+ * - `keys` must be null, or point to at least `len` null-terminated strings
+ * - `values` must be null, or point to at least `len` initialised Values
  */
+struct sr_object_t sr_object_from_entries(const char *const *keys,
+                                          const struct sr_value_t *values,
+                                          int len);
+
 void sr_object_free(struct sr_object_t obj);
 
 /**
@@ -2467,6 +2488,23 @@ int sr_begin(const struct sr_surreal_t *db, sr_string_t *err_ptr, struct sr_tran
  * error is reported in that statement's slot and the caller decides
  * whether to carry on or `sr_cancel`. That choice is the reason to hold a
  * handle rather than send one `BEGIN; ...; COMMIT;` query.
+ *
+ * # Why there is no `sr_tx_create`, `sr_tx_select` and so on
+ *
+ * Deliberate, not an omission. The SDK's transaction does expose typed
+ * operations, and forwarding them would be straightforward -- but each one
+ * is `sr_tx_query` with the statement written for you, over bound
+ * variables. They would add entry points to the ABI without adding
+ * anything a caller cannot already do, and every one is a signature that
+ * has to be kept, documented and tested forever.
+ *
+ * The asymmetry with `sr_create` and friends on the connection is real and
+ * is the honest argument for adding them: a caller who starts there and
+ * then needs a transaction has to rewrite those calls as SQL. That is a
+ * convenience question rather than a capability one, and it is better
+ * answered a level up, where a wrapper can build the statement once and
+ * type the result properly, than by widening this ABI. Revisit if a
+ * consumer finds a case SQL cannot reach.
  *
  * # Safety
  *
@@ -2761,9 +2799,63 @@ struct sr_value_t *sr_value_collection(const struct sr_value_t *const *geoms, in
 struct sr_value_t *sr_value_bytes(const uint8_t *data, int len);
 
 /**
- * Create a Thing value (record ID) from table name and string ID
+ * Create a Thing value (record ID) with a string key
+ *
+ * # A record id key is not always a string
+ *
+ * `sr_id_t` has four shapes -- `SR_ID_STRING`, `SR_ID_NUMBER`,
+ * `SR_ID_ARRAY` and `SR_ID_OBJECT` -- and all four occur in ordinary use:
+ * `CREATE t:1` gives a number, `CREATE t:['a',1]` an array, `CREATE t:{x:1}`
+ * an object. Reading hands back whichever it is.
+ *
+ * This constructor writes a string. Pointing it at a record created with a
+ * number produces a well-formed record id that refers to nothing, and a
+ * query against it returns no rows and no error -- the failure is silent.
+ * Use `sr_value_thing_num`, `sr_value_thing_arr` or `sr_value_thing_obj`
+ * to match the other three.
  */
 struct sr_value_t *sr_value_thing(const char *table, const char *id);
+
+/**
+ * Create a Thing value (record ID) with a numeric key
+ *
+ * The shape `CREATE t:1` produces. A string key that happens to contain
+ * digits is a different record: `t:1` and `t:"1"` do not refer to the same
+ * thing, and neither errors when confused for the other.
+ *
+ * # Safety
+ *
+ * - `table` must be a valid null-terminated UTF-8 string
+ */
+struct sr_value_t *sr_value_thing_num(const char *table, int64_t id);
+
+/**
+ * Create a Thing value (record ID) with an array key
+ *
+ * The shape `CREATE t:['a', 1]` produces. The array is copied; the caller
+ * keeps ownership of the one it passed in. A null array yields an empty
+ * key, which is a valid -- if unusual -- record id rather than an error.
+ *
+ * # Safety
+ *
+ * - `table` must be a valid null-terminated UTF-8 string
+ * - `id` must be a valid pointer to an array, or null
+ */
+struct sr_value_t *sr_value_thing_arr(const char *table, const struct sr_array_t *id);
+
+/**
+ * Create a Thing value (record ID) with an object key
+ *
+ * The shape `CREATE t:{ x: 1 }` produces. The object is copied; the caller
+ * keeps ownership of the one it passed in. A null object yields an empty
+ * key rather than an error.
+ *
+ * # Safety
+ *
+ * - `table` must be a valid null-terminated UTF-8 string
+ * - `id` must be a valid pointer to an object, or null
+ */
+struct sr_value_t *sr_value_thing_obj(const char *table, const struct sr_object_t *id);
 
 /**
  * Free a value created by sr_value_* functions

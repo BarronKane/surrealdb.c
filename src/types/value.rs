@@ -587,7 +587,20 @@ impl Value {
         Box::into_raw(Box::new(Value::SR_VALUE_BYTES(bytes)))
     }
 
-    /// Create a Thing value (record ID) from table name and string ID
+    /// Create a Thing value (record ID) with a string key
+    ///
+    /// # A record id key is not always a string
+    ///
+    /// `sr_id_t` has four shapes -- `SR_ID_STRING`, `SR_ID_NUMBER`,
+    /// `SR_ID_ARRAY` and `SR_ID_OBJECT` -- and all four occur in ordinary use:
+    /// `CREATE t:1` gives a number, `CREATE t:['a',1]` an array, `CREATE t:{x:1}`
+    /// an object. Reading hands back whichever it is.
+    ///
+    /// This constructor writes a string. Pointing it at a record created with a
+    /// number produces a well-formed record id that refers to nothing, and a
+    /// query against it returns no rows and no error -- the failure is silent.
+    /// Use `sr_value_thing_num`, `sr_value_thing_arr` or `sr_value_thing_obj`
+    /// to match the other three.
     #[export_name = "sr_value_thing"]
     pub extern "C" fn value_thing(table: *const std::ffi::c_char, id: *const std::ffi::c_char) -> *mut Value {
         let table_str = unsafe { std::ffi::CStr::from_ptr(table) }
@@ -602,6 +615,87 @@ impl Value {
             table: table_str,
             id: crate::thing::Id::SR_ID_STRING(id_str),
         })))
+    }
+
+    /// Create a Thing value (record ID) with a numeric key
+    ///
+    /// The shape `CREATE t:1` produces. A string key that happens to contain
+    /// digits is a different record: `t:1` and `t:"1"` do not refer to the same
+    /// thing, and neither errors when confused for the other.
+    ///
+    /// # Safety
+    ///
+    /// - `table` must be a valid null-terminated UTF-8 string
+    #[export_name = "sr_value_thing_num"]
+    pub extern "C" fn value_thing_num(table: *const std::ffi::c_char, id: i64) -> *mut Value {
+        Box::into_raw(Box::new(Value::SR_VALUE_THING(Thing {
+            table: Self::thing_table(table),
+            id: crate::thing::Id::SR_ID_NUMBER(id),
+        })))
+    }
+
+    /// Create a Thing value (record ID) with an array key
+    ///
+    /// The shape `CREATE t:['a', 1]` produces. The array is copied; the caller
+    /// keeps ownership of the one it passed in. A null array yields an empty
+    /// key, which is a valid -- if unusual -- record id rather than an error.
+    ///
+    /// # Safety
+    ///
+    /// - `table` must be a valid null-terminated UTF-8 string
+    /// - `id` must be a valid pointer to an array, or null
+    #[export_name = "sr_value_thing_arr"]
+    pub extern "C" fn value_thing_arr(
+        table: *const std::ffi::c_char,
+        id: *const crate::array::Array,
+    ) -> *mut Value {
+        let key = match id.is_null() {
+            true => crate::array::Array::empty(),
+            false => unsafe { &*id }.clone(),
+        };
+        Box::into_raw(Box::new(Value::SR_VALUE_THING(Thing {
+            table: Self::thing_table(table),
+            id: crate::thing::Id::SR_ID_ARRAY(Box::new(key)),
+        })))
+    }
+
+    /// Create a Thing value (record ID) with an object key
+    ///
+    /// The shape `CREATE t:{ x: 1 }` produces. The object is copied; the caller
+    /// keeps ownership of the one it passed in. A null object yields an empty
+    /// key rather than an error.
+    ///
+    /// # Safety
+    ///
+    /// - `table` must be a valid null-terminated UTF-8 string
+    /// - `id` must be a valid pointer to an object, or null
+    #[export_name = "sr_value_thing_obj"]
+    pub extern "C" fn value_thing_obj(
+        table: *const std::ffi::c_char,
+        id: *const Object,
+    ) -> *mut Value {
+        let key = match id.is_null() {
+            true => Object::new(),
+            false => unsafe { &*id }.clone(),
+        };
+        Box::into_raw(Box::new(Value::SR_VALUE_THING(Thing {
+            table: Self::thing_table(table),
+            id: crate::thing::Id::SR_ID_OBJECT(key),
+        })))
+    }
+
+    /// Shared by every `sr_value_thing*` constructor.
+    ///
+    /// A null or non-UTF-8 table becomes an empty name rather than a crash,
+    /// matching how the rest of these constructors treat bad input.
+    fn thing_table(table: *const std::ffi::c_char) -> string_t {
+        if table.is_null() {
+            return String::new().to_string_t();
+        }
+        unsafe { std::ffi::CStr::from_ptr(table) }
+            .to_string_lossy()
+            .to_string()
+            .to_string_t()
     }
 
     /// Free a value created by sr_value_* functions

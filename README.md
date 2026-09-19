@@ -247,8 +247,14 @@ of `sr_begin`, so it inherits the namespace, database and authentication in
 force then — a later `sr_use_db` on the connection does not move a transaction
 that is already open.
 
-`sr_tx_query` takes SQL, which reaches everything; there are no per-operation
-transaction variants.
+`sr_tx_query` takes SQL, which reaches everything. There are deliberately no
+`sr_tx_create` / `sr_tx_select` / `sr_tx_update` variants: each would be this
+call with the statement written for you over bound variables, so they would
+widen the ABI without adding anything reachable. The asymmetry with `sr_create`
+and friends on the connection is the honest argument for adding them — a caller
+who starts there and then needs a transaction rewrites those calls as SQL — but
+that is convenience, not capability, and it is better answered by a wrapper that
+can build the statement once and type the result.
 
 ## Sessions
 

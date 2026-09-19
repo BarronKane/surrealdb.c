@@ -165,6 +165,23 @@ impl Transaction {
     /// whether to carry on or `sr_cancel`. That choice is the reason to hold a
     /// handle rather than send one `BEGIN; ...; COMMIT;` query.
     ///
+    /// # Why there is no `sr_tx_create`, `sr_tx_select` and so on
+    ///
+    /// Deliberate, not an omission. The SDK's transaction does expose typed
+    /// operations, and forwarding them would be straightforward -- but each one
+    /// is `sr_tx_query` with the statement written for you, over bound
+    /// variables. They would add entry points to the ABI without adding
+    /// anything a caller cannot already do, and every one is a signature that
+    /// has to be kept, documented and tested forever.
+    ///
+    /// The asymmetry with `sr_create` and friends on the connection is real and
+    /// is the honest argument for adding them: a caller who starts there and
+    /// then needs a transaction has to rewrite those calls as SQL. That is a
+    /// convenience question rather than a capability one, and it is better
+    /// answered a level up, where a wrapper can build the statement once and
+    /// type the result properly, than by widening this ABI. Revisit if a
+    /// consumer finds a case SQL cannot reach.
+    ///
     /// # Safety
     ///
     /// - `err_ptr` must be a valid pointer or null
