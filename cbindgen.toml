@@ -44,6 +44,7 @@ exclude = ["SR_AGAIN", "SR_CLOSED", "SR_ERROR", "SR_FATAL", "SR_DEFAULT_WORKER_T
 "Action" = "action"
 "BTreeMap_String__Value" = "opaque_object_internal_t"
 "Stream" = "stream_t"
+"Transaction" = "transaction_t"
 "RpcStream" = "rpc_stream_t"
 "SurrealError" = "error_t"
 "Surreal" = "surreal_t"

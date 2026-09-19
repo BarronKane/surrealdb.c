@@ -12,5 +12,6 @@ pub mod result;
 pub mod stream;
 pub mod string;
 pub mod thing;
+pub mod transaction;
 pub mod uuid;
 pub mod value;

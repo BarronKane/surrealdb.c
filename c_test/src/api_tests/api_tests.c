@@ -611,14 +611,14 @@ int test_sr_patch_replace(void) {
 int test_sr_begin(void) {
     sr_surreal_t *db;
     if (setup_db(&db) != API_TEST_PASS) return API_TEST_FAIL;
-    
-    sr_string_t err;
-    int res = sr_begin(db, &err);
+
+    sr_string_t err = NULL;
+    sr_transaction_t *tx = NULL;
+    int res = sr_begin(db, &err, &tx);
     ASSERT_GE(res, 0);
-    
-    /* Cancel to clean up */
-    sr_cancel(db, &err);
-    
+
+    sr_cancel(tx, &err);
+    if (err) sr_string_free(err);
     sr_surreal_disconnect(db);
     return API_TEST_PASS;
 }
@@ -626,13 +626,15 @@ int test_sr_begin(void) {
 int test_sr_commit(void) {
     sr_surreal_t *db;
     if (setup_db(&db) != API_TEST_PASS) return API_TEST_FAIL;
-    
-    sr_string_t err;
-    sr_begin(db, &err);
-    
-    int res = sr_commit(db, &err);
+
+    sr_string_t err = NULL;
+    sr_transaction_t *tx = NULL;
+    if (sr_begin(db, &err, &tx) < 0) { sr_surreal_disconnect(db); return API_TEST_FAIL; }
+
+    int res = sr_commit(tx, &err);
     ASSERT_GE(res, 0);
-    
+
+    if (err) sr_string_free(err);
     sr_surreal_disconnect(db);
     return API_TEST_PASS;
 }
@@ -640,13 +642,15 @@ int test_sr_commit(void) {
 int test_sr_cancel(void) {
     sr_surreal_t *db;
     if (setup_db(&db) != API_TEST_PASS) return API_TEST_FAIL;
-    
-    sr_string_t err;
-    sr_begin(db, &err);
-    
-    int res = sr_cancel(db, &err);
+
+    sr_string_t err = NULL;
+    sr_transaction_t *tx = NULL;
+    if (sr_begin(db, &err, &tx) < 0) { sr_surreal_disconnect(db); return API_TEST_FAIL; }
+
+    int res = sr_cancel(tx, &err);
     ASSERT_GE(res, 0);
-    
+
+    if (err) sr_string_free(err);
     sr_surreal_disconnect(db);
     return API_TEST_PASS;
 }

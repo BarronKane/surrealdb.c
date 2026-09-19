@@ -215,6 +215,41 @@ registered, because the SDK builds `KILL {id}` from a bare UUID — which the
 parser rejects — and runs it under a blank session. See the anchor note in
 `Cargo.toml`.
 
+## Transactions
+
+`sr_begin` hands back a handle. Statements run on it are scoped together, and
+the caller decides what happens in between:
+
+```c
+sr_transaction_t *tx = NULL;
+if (sr_begin(db, &err, &tx) < 0) { return 1; }
+
+sr_tx_query(tx, &err, &res, "UPDATE account:a SET bal -= 10;", NULL);
+/* your own code here — check a balance, talk to the engine, bail out */
+sr_tx_query(tx, &err, &res, "UPDATE account:b SET bal += 10;", NULL);
+
+sr_commit(tx, &err);            // or sr_cancel(tx, &err)
+```
+
+Nothing written inside is visible outside until `sr_commit`, and `sr_cancel`
+discards all of it. A statement that fails reports in its own `sr_arr_res_t`
+slot without tearing the transaction down — whether that is fatal is the
+caller's call, which is the reason to hold a handle rather than send one
+`BEGIN; …; COMMIT;` query.
+
+**`sr_commit` and `sr_cancel` both consume the handle**, and one of them must be
+called. There is no separate free: dropping the pointer without either leaves
+the transaction open in the datastore until it times out, holding whatever it
+has locked.
+
+A transaction runs on a forked session, copied from the connection at the moment
+of `sr_begin`, so it inherits the namespace, database and authentication in
+force then — a later `sr_use_db` on the connection does not move a transaction
+that is already open.
+
+`sr_tx_query` takes SQL, which reaches everything; there are no per-operation
+transaction variants.
+
 ## Sessions
 
 An RPC context (`sr_surreal_rpc_new`) carries a session map. Since SurrealDB 3.1

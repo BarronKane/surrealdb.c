@@ -124,6 +124,16 @@ typedef struct sr_surreal_t sr_surreal_t;
 typedef struct sr_surreal_rpc_t sr_surreal_rpc_t;
 
 /**
+ * An open transaction.
+ *
+ * Statements run through `sr_tx_query` are scoped to it and are not visible
+ * outside until `sr_commit`. `sr_commit` and `sr_cancel` both consume the
+ * handle, and one of them must be called: a handle that is simply forgotten
+ * leaves the transaction open in the datastore until it times out.
+ */
+typedef struct sr_transaction_t sr_transaction_t;
+
+/**
  * A null-terminated C string type
  *
  * This is a wrapper around a raw C string pointer that handles memory management.
@@ -863,60 +873,6 @@ void sr_surreal_disconnect(struct sr_surreal_t *db);
  * ```
  */
 int sr_authenticate(const struct sr_surreal_t *db, sr_string_t *err_ptr, const char *token);
-
-/**
- * Begin a new transaction
- *
- * Starts a new database transaction.
- *
- * # Examples
- *
- * ```c
- * sr_surreal_t *db;
- * sr_string_t err;
- * if (sr_begin(db, &err) < 0) {
- *     printf("Failed to begin transaction: %s", err);
- *     return 1;
- * }
- * ```
- */
-int sr_begin(const struct sr_surreal_t *db, sr_string_t *err_ptr);
-
-/**
- * Cancel the current transaction
- *
- * Cancels and rolls back the current database transaction.
- *
- * # Examples
- *
- * ```c
- * sr_surreal_t *db;
- * sr_string_t err;
- * if (sr_cancel(db, &err) < 0) {
- *     printf("Failed to cancel transaction: %s", err);
- *     return 1;
- * }
- * ```
- */
-int sr_cancel(const struct sr_surreal_t *db, sr_string_t *err_ptr);
-
-/**
- * Commit the current transaction
- *
- * Commits and finalizes the current database transaction.
- *
- * # Examples
- *
- * ```c
- * sr_surreal_t *db;
- * sr_string_t err;
- * if (sr_commit(db, &err) < 0) {
- *     printf("Failed to commit transaction: %s", err);
- *     return 1;
- * }
- * ```
- */
-int sr_commit(const struct sr_surreal_t *db, sr_string_t *err_ptr);
 
 /**
  * Create a record
@@ -2458,6 +2414,102 @@ void sr_rpc_stream_free(struct sr_rpc_stream_t *stream);
  * to avoid memory leaks.
  */
 void sr_string_free(sr_string_t string);
+
+/**
+ * Begin a transaction.
+ *
+ * Writes an open transaction to `tx_ptr`. Statements run on it through
+ * `sr_tx_query` are scoped together: none of them are visible to anything
+ * else until `sr_commit`, and `sr_cancel` discards the lot.
+ *
+ * ```c
+ * sr_transaction_t *tx = NULL;
+ * if (sr_begin(db, &err, &tx) < 0) { return 1; }
+ *
+ * sr_tx_query(tx, &err, &res, "UPDATE account:a SET bal -= 10;", NULL);
+ * sr_tx_query(tx, &err, &res, "UPDATE account:b SET bal += 10;", NULL);
+ *
+ * sr_commit(tx, &err);   // or sr_cancel(tx, &err) -- either frees `tx`
+ * ```
+ *
+ * Unlike writing `BEGIN; ...; COMMIT;` as one query, the caller decides
+ * what happens between statements -- which is the point of a transaction
+ * handle and the reason the single-query form is not a substitute.
+ *
+ * # The handle must be committed or cancelled
+ *
+ * Both consume it. Losing the pointer without calling either leaves the
+ * transaction open in the datastore until it times out, holding whatever
+ * it has locked.
+ *
+ * # It runs on its own session
+ *
+ * The transaction takes a forked session, copied from this connection's
+ * at the moment of the call, so it inherits the namespace, database and
+ * authentication in force then. Later `sr_use_ns` or `sr_use_db` on the
+ * connection does not move a transaction that is already open.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `tx_ptr` must be a valid pointer to receive the transaction
+ */
+int sr_begin(const struct sr_surreal_t *db, sr_string_t *err_ptr, struct sr_transaction_t **tx_ptr);
+
+/**
+ * Run a query inside a transaction.
+ *
+ * The same `sr_arr_res_t` array `sr_query` returns -- one entry per
+ * statement, each carrying either rows or its own error -- except that
+ * nothing it writes is visible outside the transaction until `sr_commit`.
+ *
+ * A statement that fails does not by itself roll the transaction back; the
+ * error is reported in that statement's slot and the caller decides
+ * whether to carry on or `sr_cancel`. That choice is the reason to hold a
+ * handle rather than send one `BEGIN; ...; COMMIT;` query.
+ *
+ * # Safety
+ *
+ * - `err_ptr` must be a valid pointer or null
+ * - `res_ptr` must be a valid pointer to receive the results
+ * - `query` must be a valid null-terminated string
+ * - `vars` must be a valid pointer to an object, or null for none
+ *
+ * Free the results with `sr_arr_res_arr_free`.
+ */
+int sr_tx_query(const struct sr_transaction_t *tx,
+                sr_string_t *err_ptr,
+                struct sr_arr_res_t **res_ptr,
+                const char *query,
+                const struct sr_object_t *vars);
+
+/**
+ * Commit a transaction and free the handle.
+ *
+ * Everything run through `sr_tx_query` becomes visible together, or not at
+ * all if this fails. The handle is consumed either way and must not be
+ * used again.
+ *
+ * # Safety
+ *
+ * - `tx` must be a valid pointer from `sr_begin`, not previously consumed
+ * - `err_ptr` must be a valid pointer or null
+ */
+int sr_commit(struct sr_transaction_t *tx, sr_string_t *err_ptr);
+
+/**
+ * Roll a transaction back and free the handle.
+ *
+ * Discards everything run through `sr_tx_query`. The handle is consumed
+ * and must not be used again. This is also how to abandon a transaction:
+ * there is no separate free.
+ *
+ * # Safety
+ *
+ * - `tx` must be a valid pointer from `sr_begin`, not previously consumed
+ * - `err_ptr` must be a valid pointer or null
+ */
+int sr_cancel(struct sr_transaction_t *tx, sr_string_t *err_ptr);
 
 /**
  * Print a value to stdout for debugging
